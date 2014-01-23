@@ -294,6 +294,15 @@ impl rtio::RtioPipe for FileDesc {
     fn write(&mut self, buf: &[u8]) -> Result<(), IoError> {
         self.inner_write(buf)
     }
+    fn clone(&self) -> Result<~rtio::RtioPipe, IoError> {
+        match unsafe { libc::dup(self.fd) } {
+            -1 => Err(super::last_error()),
+            fd => Ok(~FileDesc {
+                fd: fd,
+                close_on_drop: true
+            } as ~rtio::RtioPipe)
+        }
+    }
 }
 
 impl rtio::RtioTTY for FileDesc {

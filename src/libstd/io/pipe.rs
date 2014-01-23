@@ -51,6 +51,16 @@ impl PipeStream {
     pub fn new(inner: ~RtioPipe) -> PipeStream {
         PipeStream { obj: inner }
     }
+
+    pub fn clone(&self) -> Option<PipeStream> {
+        match self.obj.clone() {
+            Ok(obj) => Some(PipeStream { obj: obj }),
+            Err(e) => {
+                io_error::cond.raise(e);
+                None
+            }
+        }
+    }
 }
 
 impl Reader for PipeStream {

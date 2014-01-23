@@ -108,8 +108,25 @@ fn setsockopt<T>(fd: sock_t, opt: libc::c_int, val: libc::c_int,
         let ret = libc::setsockopt(fd, opt, val,
                                    payload,
                                    mem::size_of::<T>() as libc::socklen_t);
-        super::mkerr_libc(ret)
+        if ret != 0 {
+            Err(last_error())
+        } else {
+            Ok(())
+        }
     }
+}
+
+#[cfg(windows)]
+fn last_error() -> io::IoError {
+    extern "system" {
+        fn WSAGetLastError() -> libc::c_int;
+    }
+    super::translate_error(unsafe { WSAGetLastError() }, true)
+}
+
+#[cfg(not(windows))]
+fn last_error() -> io::IoError {
+    super::last_error()
 }
 
 #[cfg(windows)] unsafe fn close(sock: sock_t) { libc::closesocket(sock); }
@@ -128,7 +145,7 @@ fn sockname(fd: sock_t,
                     storage as *mut libc::sockaddr,
                     &mut len as *mut libc::socklen_t);
         if ret != 0 {
-            return Err(super::last_error())
+            return Err(last_error())
         }
     }
     return sockaddr_to_addr(&storage, len as uint);
@@ -231,7 +248,7 @@ impl TcpStream {
                     libc::connect(fd, addrp as *libc::sockaddr,
                                   len as libc::socklen_t)
                 }) {
-                    -1 => Err(super::last_error()),
+                    -1 => Err(last_error()),
                     _ => Ok(ret),
                 }
             })
@@ -286,7 +303,7 @@ impl rtio::RtioTcpStream for TcpStream {
         if ret == 0 {
             Err(io::standard_error(io::EndOfFile))
         } else if ret < 0 {
-            Err(super::last_error())
+            Err(last_error())
         } else {
             Ok(ret as uint)
         }
@@ -301,7 +318,7 @@ impl rtio::RtioTcpStream for TcpStream {
             }
         });
         if ret < 0 {
-            Err(super::last_error())
+            Err(last_error())
         } else {
             Ok(())
         }
@@ -320,6 +337,47 @@ impl rtio::RtioTcpStream for TcpStream {
     }
     fn letdie(&mut self) -> IoResult<()> {
         self.set_keepalive(None)
+    }
+
+    #[cfg(not(windows))]
+    fn clone(&self) -> IoResult<~rtio::RtioTcpStream> {
+        match unsafe { libc::dup(self.fd) } {
+            -1 => Err(last_error()),
+            fd => Ok(~TcpStream { fd: fd } as ~rtio::RtioTcpStream)
+        }
+    }
+
+    #[cfg(windows)]
+    fn clone(&self) -> IoResult<~rtio::RtioTcpStream> {
+        extern "system" {
+            fn WSADuplicateSocketA(s: libc::SOCKET,
+                                   dwProcessId: libc::DWORD,
+                                   lpProtocolInfo: libc::LPWSAPROTOCOL_INFO)
+                                        -> libc::c_int;
+            fn WSASocketA(af: libc::c_int,
+                          type_: libc::c_int,
+                          protocol: libc::c_int,
+                          lpProtocolInfo: libc::LPWSAPROTOCOL_INFO,
+                          g: libc::GROUP,
+                          dwFlags: libc::DWORD) -> libc::SOCKET;
+        }
+        let mut info: libc::WSAPROTOCOL_INFO = unsafe { intrinsics::init() };
+        match unsafe {
+            WSADuplicateSocketA(self.fd,
+                                libc::GetCurrentProcessId(),
+                                &mut info)
+        } {
+            0 => {}
+            _ => return Err(last_error())
+        }
+
+        match unsafe {
+            WSASocketA(info.iAddressFamily, info.iSocketType,
+                       info.iProtocol, &mut info, 0, 0)
+        } {
+            libc::INVALID_SOCKET => Err(last_error()),
+            fd => Ok(~TcpStream { fd: fd } as ~rtio::RtioTcpStream)
+        }
     }
 }
 
@@ -350,7 +408,7 @@ impl TcpListener {
                 let ret = TcpListener { fd: fd };
                 match libc::bind(fd, addrp as *libc::sockaddr,
                                  len as libc::socklen_t) {
-                    -1 => Err(super::last_error()),
+                    -1 => Err(last_error()),
                     _ => Ok(ret),
                 }
             })
@@ -361,7 +419,7 @@ impl TcpListener {
 
     pub fn native_listen(self, backlog: int) -> IoResult<TcpAcceptor> {
         match unsafe { libc::listen(self.fd, backlog as libc::c_int) } {
-            -1 => Err(super::last_error()),
+            -1 => Err(last_error()),
             _ => Ok(TcpAcceptor { listener: self })
         }
     }
@@ -401,7 +459,7 @@ impl TcpAcceptor {
                              storagep as *mut libc::sockaddr,
                              &mut size as *mut libc::socklen_t) as libc::c_int
             }) as sock_t {
-                -1 => Err(super::last_error()),
+                -1 => Err(last_error()),
                 fd => Ok(TcpStream { fd: fd })
             }
         }
@@ -440,7 +498,7 @@ impl UdpSocket {
                 let ret = UdpSocket { fd: fd };
                 match libc::bind(fd, addrp as *libc::sockaddr,
                                  len as libc::socklen_t) {
-                    -1 => Err(super::last_error()),
+                    -1 => Err(last_error()),
                     _ => Ok(ret),
                 }
             })
@@ -505,7 +563,7 @@ impl rtio::RtioUdpSocket for UdpSocket {
                                storagep as *mut libc::sockaddr,
                                &mut addrlen) as libc::c_int
             });
-            if ret < 0 { return Err(super::last_error()) }
+            if ret < 0 { return Err(last_error()) }
             sockaddr_to_addr(&storage, addrlen as uint).and_then(|addr| {
                 Ok((ret as uint, addr))
             })
@@ -524,7 +582,7 @@ impl rtio::RtioUdpSocket for UdpSocket {
                              len as libc::socklen_t) as libc::c_int
             });
             match ret {
-                -1 => Err(super::last_error()),
+                -1 => Err(last_error()),
                 n if n as uint != buf.len() => {
                     Err(io::IoError {
                         kind: io::OtherIoError,

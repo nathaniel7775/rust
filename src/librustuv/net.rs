@@ -19,7 +19,9 @@ use std::rt::rtio;
 use std::rt::task::BlockedTask;
 use std::unstable::intrinsics;
 
+use access::Access;
 use homing::{HomingIO, HomeHandle};
+use rc::Refcount;
 use stream::StreamWatcher;
 use super::{Loop, Request, UvError, Buf, status_to_io_result,
             uv_error_to_io_error, UvHandle, slice_to_uv_buf,
@@ -152,6 +154,14 @@ pub struct TcpWatcher {
     handle: *uvll::uv_tcp_t,
     stream: StreamWatcher,
     home: HomeHandle,
+    priv refcount: Refcount,
+
+    // libuv can't support concurrent reads and concurrent writes of the same
+    // stream object, so we use these access guards in order to arbitrate among
+    // multiple concurrent reads and writes. Note that libuv *can* read and
+    // write simultaneously, it just can't read and read simultaneously.
+    priv read_access: Access,
+    priv write_access: Access,
 }
 
 pub struct TcpListener {
@@ -183,6 +193,9 @@ impl TcpWatcher {
             home: home,
             handle: handle,
             stream: StreamWatcher::new(handle),
+            refcount: Refcount::new(),
+            read_access: Access::new(),
+            write_access: Access::new(),
         }
     }
 
@@ -238,12 +251,14 @@ impl rtio::RtioSocket for TcpWatcher {
 
 impl rtio::RtioTcpStream for TcpWatcher {
     fn read(&mut self, buf: &mut [u8]) -> Result<uint, IoError> {
-        let _m = self.fire_homing_missile();
+        let m = self.fire_homing_missile();
+        let _g = self.read_access.grant(m);
         self.stream.read(buf).map_err(uv_error_to_io_error)
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<(), IoError> {
-        let _m = self.fire_homing_missile();
+        let m = self.fire_homing_missile();
+        let _g = self.write_access.grant(m);
         self.stream.write(buf).map_err(uv_error_to_io_error)
     }
 
@@ -280,6 +295,17 @@ impl rtio::RtioTcpStream for TcpWatcher {
             uvll::uv_tcp_keepalive(self.handle, 0 as c_int, 0 as c_uint)
         })
     }
+
+    fn clone(&self) -> Result<~rtio::RtioTcpStream, IoError> {
+        Ok(~TcpWatcher {
+            handle: self.handle,
+            stream: StreamWatcher::new(self.handle),
+            home: self.home.clone(),
+            refcount: self.refcount.clone(),
+            write_access: self.write_access.clone(),
+            read_access: self.read_access.clone(),
+        } as ~rtio::RtioTcpStream)
+    }
 }
 
 impl UvHandle<uvll::uv_tcp_t> for TcpWatcher {
@@ -289,7 +315,9 @@ impl UvHandle<uvll::uv_tcp_t> for TcpWatcher {
 impl Drop for TcpWatcher {
     fn drop(&mut self) {
         let _m = self.fire_homing_missile();
-        self.close();
+        if self.refcount.decrement() {
+            self.close();
+        }
     }
 }
 

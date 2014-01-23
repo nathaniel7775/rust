@@ -67,8 +67,10 @@ pub use self::tty::TtyWatcher;
 
 mod macros;
 
-mod queue;
+mod access;
 mod homing;
+mod queue;
+mod rc;
 
 /// The implementation of `rtio` for libuv
 pub mod uvio;
