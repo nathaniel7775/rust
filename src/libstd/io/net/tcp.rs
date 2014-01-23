@@ -8,6 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! TCP network connections
+//!
+//! This module contains the ability to open a TCP stream to a socket address,
+//! as well as creating a socket server to accept incoming connections. The
+//! destination and binding addresses can either be an IPv4 or IPv6 address.
+//!
+//! A TCP connection implements the `Reader` and `Writer` traits, while the TCP
+//! listener (socket server) implements the `Listener` and `Acceptor` traits.
+
+#[deny(missing_doc)];
+
 use clone::Clone;
 use io::net::ip::SocketAddr;
 use io::{Reader, Writer, Listener, Acceptor};
@@ -17,6 +28,24 @@ use result::{Ok, Err};
 use rt::rtio::{IoFactory, LocalIo, RtioSocket, RtioTcpListener};
 use rt::rtio::{RtioTcpAcceptor, RtioTcpStream};
 
+/// A structure which represents a TCP stream between a local socket and a
+/// remote socket.
+///
+/// # Example
+///
+/// ```rust
+/// use std::io::net::tcp::TcpStream;
+/// use std::io::net::ip::{Ipv4Addr, SocketAddr};
+///
+/// # let _g = ::std::io::ignore_io_error();
+/// let addr = SocketAddr { ip: Ipv4Addr(127, 0, 0, 1), port: 34254 };
+/// let mut stream = TcpStream::connect(addr);
+///
+/// stream.write([1]);
+/// let mut buf = [0];
+/// stream.read(buf);
+/// drop(stream); // close the connection
+/// ```
 pub struct TcpStream {
     priv obj: ~RtioTcpStream
 }
@@ -26,12 +55,26 @@ impl TcpStream {
         TcpStream { obj: s }
     }
 
+    /// Creates a TCP connection to a remote socket address.
+    ///
+    /// If no error is encountered, then `Some(stream)` is returned.
+    ///
+    /// # Failure
+    ///
+    /// If this function encounters an I/O error, it will be raised on the
+    /// `io_error` condition. If an error happens, then `None` is returned.
     pub fn connect(addr: SocketAddr) -> Option<TcpStream> {
         LocalIo::maybe_raise(|io| {
             io.tcp_connect(addr).map(TcpStream::new)
         })
     }
 
+    /// Returns the socket address of the remote peer of this TCP connection.
+    ///
+    /// # Failure
+    ///
+    /// This function will raise on the `io_error` condition and return `None`
+    /// if an error occurs.
     pub fn peer_name(&mut self) -> Option<SocketAddr> {
         match self.obj.peer_name() {
             Ok(pn) => Some(pn),
@@ -43,6 +86,12 @@ impl TcpStream {
         }
     }
 
+    /// Returns the socket address of the local half of this TCP connection.
+    ///
+    /// # Failure
+    ///
+    /// This function will raise on the `io_error` condition and return `None`
+    /// if an error occurs.
     pub fn socket_name(&mut self) -> Option<SocketAddr> {
         match self.obj.socket_name() {
             Ok(sn) => Some(sn),
@@ -54,6 +103,19 @@ impl TcpStream {
         }
     }
 
+    /// Creates a new handle to this TCP stream, allowing for simultaneous reads
+    /// and writes of this connection.
+    ///
+    /// The underlying TCP stream will not be closed until all handles to the
+    /// stream have been deallocated. All handles will also follow the same
+    /// stream, but two concurrent reads will not receive the same data.
+    /// Instead, the first read will receive the first packet received, and the
+    /// second read will receive the second packet.
+    ///
+    /// # Failure
+    ///
+    /// This function will raise on the `io_error` condition and return `None`
+    /// if an error occurs.
     pub fn clone(&self) -> Option<TcpStream> {
         match self.obj.clone() {
             Ok(obj) => Some(TcpStream { obj: obj }),
@@ -89,17 +151,63 @@ impl Writer for TcpStream {
     }
 }
 
+/// A structure representing a socket server. This listener is used to create a
+/// `TcpAcceptor` which can be used to accept sockets on a local port.
+///
+/// # Example
+///
+/// ```rust
+/// use std::io::net::tcp::TcpListener;
+/// use std::io::net::ip::{Ipv4Addr, SocketAddr};
+/// use std::io::{Acceptor, Listener};
+///
+/// # let _g = ::std::io::ignore_io_error();
+/// let addr = SocketAddr { ip: Ipv4Addr(127, 0, 0, 1), port: 80 };
+/// let listener = TcpListener::bind(addr);
+///
+/// // bind the listener to the specified address
+/// let mut acceptor = listener.listen();
+///
+/// // accept connections and process them
+/// # fn handle_client(_: ::std::io::net::tcp::TcpStream) {}
+/// for stream in acceptor.incoming() {
+///     do spawn {
+///         handle_client(stream);
+///     }
+/// }
+///
+/// // close the socket server
+/// drop(acceptor);
+/// ```
 pub struct TcpListener {
     priv obj: ~RtioTcpListener
 }
 
 impl TcpListener {
+    /// Creates a new `TcpListener` which will be bound to the specified local
+    /// socket address. This listener is not ready for accepting connections,
+    /// `listen` must be called on it before that's possible.
+    ///
+    /// Binding with a port number of 0 will request that the OS assigns a port
+    /// to this listener. The port allocated can be queried via the
+    /// `socket_name` function.
+    ///
+    /// # Failure
+    ///
+    /// This function will raise on the `io_error` condition and return `None`
+    /// if an error occurs.
     pub fn bind(addr: SocketAddr) -> Option<TcpListener> {
         LocalIo::maybe_raise(|io| {
             io.tcp_bind(addr).map(|l| TcpListener { obj: l })
         })
     }
 
+    /// Returns the local socket address of this listener.
+    ///
+    /// # Failure
+    ///
+    /// This function will raise on the `io_error` condition and return `None`
+    /// if an error occurs.
     pub fn socket_name(&mut self) -> Option<SocketAddr> {
         match self.obj.socket_name() {
             Ok(sn) => Some(sn),
@@ -124,6 +232,9 @@ impl Listener<TcpStream, TcpAcceptor> for TcpListener {
     }
 }
 
+/// The accepting half of a TCP socket server. This structure is created through
+/// a `TcpListener`'s `listen` method, and this object can be used to accept new
+/// `TcpStream` instances.
 pub struct TcpAcceptor {
     priv obj: ~RtioTcpAcceptor
 }
