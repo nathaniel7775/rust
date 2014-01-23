@@ -252,7 +252,7 @@ pub fn trans_intrinsic(ccx: @CrateContext,
         "size_of" => {
             let tp_ty = substs.tys[0];
             let lltp_ty = type_of::type_of(ccx, tp_ty);
-            Ret(bcx, C_uint(ccx, machine::llsize_of_real(ccx, lltp_ty)));
+            Ret(bcx, C_u64(machine::llsize_of_real(ccx, lltp_ty)));
         }
         "move_val_init" => {
             // Create a datum reflecting the value being moved.
@@ -271,12 +271,12 @@ pub fn trans_intrinsic(ccx: @CrateContext,
         "min_align_of" => {
             let tp_ty = substs.tys[0];
             let lltp_ty = type_of::type_of(ccx, tp_ty);
-            Ret(bcx, C_uint(ccx, machine::llalign_of_min(ccx, lltp_ty)));
+            Ret(bcx, C_u64(machine::llalign_of_min(ccx, lltp_ty)));
         }
         "pref_align_of"=> {
             let tp_ty = substs.tys[0];
             let lltp_ty = type_of::type_of(ccx, tp_ty);
-            Ret(bcx, C_uint(ccx, machine::llalign_of_pref(ccx, lltp_ty)));
+            Ret(bcx, C_u64(machine::llalign_of_pref(ccx, lltp_ty)));
         }
         "get_tydesc" => {
             let tp_ty = substs.tys[0];
@@ -342,7 +342,7 @@ pub fn trans_intrinsic(ccx: @CrateContext,
                         _ => fail!("transmute has non-expr arg"),
                     }
                 };
-                let pluralize = |n| if 1u == n { "" } else { "s" };
+                let pluralize = |n| if 1u64 == n { "" } else { "s" };
                 ccx.sess.span_fatal(sp,
                                     format!("transmute called on types with \
                                           different sizes: {} ({} bit{}) to \
