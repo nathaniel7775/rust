@@ -520,6 +520,16 @@ to the value of the matched value inside of the arm's action. Thus, `(0.0,
 y)` matches any tuple whose first element is zero, and binds `y` to
 the second element. `(x, y)` matches any two-element tuple, and binds both
 elements to variables.
+A subpattern can also be bound to a variable, using `variable @ pattern`. For
+example:
+
+~~~~
+# let age = 23;
+match age {
+    a @ 0..20 => println!("{} years old", a),
+    _ => println!("older than 21")
+}
+~~~~
 
 Any `match` arm can have a guard clause (written `if EXPR`), called a
 *pattern guard*, which is an expression of type `bool` that
@@ -1096,7 +1106,7 @@ let y = x.clone();
 
 let z = x;
 
-// and now, it can no longer be used since it has been moved from
+// and now, it can no longer be used since it has been moved
 ~~~
 
 The mutability of a value may be changed by moving it to a new owner:

@@ -176,6 +176,9 @@ pub fn phase_2_configure_and_expand(sess: Session,
     time(time_passes, "gated feature checking", (), |_|
          front::feature_gate::check_crate(sess, &crate));
 
+    crate = time(time_passes, "crate injection", crate, |crate|
+                 front::std_inject::maybe_inject_crates_ref(sess, crate));
+
     // strip before expansion to allow macros to depend on
     // configuration variables e.g/ in
     //
@@ -183,10 +186,6 @@ pub fn phase_2_configure_and_expand(sess: Session,
     //   mod bar { macro_rules! baz!(() => {{}}) }
     //
     // baz! should not use this definition unless foo is enabled.
-    crate = time(time_passes, "std macros injection", crate, |crate|
-                 syntax::ext::expand::inject_std_macros(sess.parse_sess,
-                                                        cfg.clone(),
-                                                        crate));
 
     crate = time(time_passes, "configuration 1", crate, |crate|
                  front::config::strip_unconfigured_items(crate));
@@ -207,8 +206,8 @@ pub fn phase_2_configure_and_expand(sess: Session,
     crate = time(time_passes, "maybe building test harness", crate, |crate|
                  front::test::modify_for_testing(sess, crate));
 
-    crate = time(time_passes, "std injection", crate, |crate|
-                 front::std_inject::maybe_inject_libstd_ref(sess, crate));
+    crate = time(time_passes, "prelude injection", crate, |crate|
+                 front::std_inject::maybe_inject_prelude(sess, crate));
 
     time(time_passes, "assinging node ids and indexing ast", crate, |crate|
          front::assign_node_ids_and_map::assign_node_ids_and_map(sess, crate))
@@ -734,6 +733,7 @@ pub fn build_session_options(binary: ~str,
     let parse_only = matches.opt_present("parse-only");
     let no_trans = matches.opt_present("no-trans");
     let no_analysis = matches.opt_present("no-analysis");
+    let no_rpath = matches.opt_present("no-rpath");
 
     let lint_levels = [lint::allow, lint::warn,
                        lint::deny, lint::forbid];
@@ -888,6 +888,7 @@ pub fn build_session_options(binary: ~str,
         parse_only: parse_only,
         no_trans: no_trans,
         no_analysis: no_analysis,
+        no_rpath: no_rpath,
         debugging_opts: debugging_opts,
         android_cross_path: android_cross_path,
         write_dependency_info: write_dependency_info,
@@ -995,6 +996,7 @@ pub fn optgroups() -> ~[getopts::groups::OptGroup] {
                         \"list\" will list all of the available passes", "NAMES"),
   optopt("", "llvm-args", "A list of arguments to pass to llvm, comma \
                            separated", "ARGS"),
+  optflag("", "no-rpath", "Disables setting the rpath in libs/exes"),
   optopt( "",  "out-dir",
                         "Write output to compiler-chosen filename
                           in <dir>", "DIR"),

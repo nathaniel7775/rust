@@ -170,6 +170,7 @@ pub struct Options {
     parse_only: bool,
     no_trans: bool,
     no_analysis: bool,
+    no_rpath: bool,
     debugging_opts: u64,
     android_cross_path: Option<~str>,
     /// Whether to write dependency files. It's (enabled, optional filename).
@@ -249,6 +250,9 @@ impl Session_ {
     }
     pub fn span_note(&self, sp: Span, msg: &str) {
         self.span_diagnostic.span_note(sp, msg)
+    }
+    pub fn span_end_note(&self, sp: Span, msg: &str) {
+        self.span_diagnostic.span_end_note(sp, msg)
     }
     pub fn note(&self, msg: &str) {
         self.span_diagnostic.handler().note(msg)
@@ -388,6 +392,7 @@ pub fn basic_options() -> @Options {
         parse_only: false,
         no_trans: false,
         no_analysis: false,
+        no_rpath: false,
         debugging_opts: 0,
         android_cross_path: None,
         write_dependency_info: (false, None),
