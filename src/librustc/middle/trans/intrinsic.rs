@@ -342,7 +342,7 @@ pub fn trans_intrinsic(ccx: @CrateContext,
                         _ => fail!("transmute has non-expr arg"),
                     }
                 };
-                let pluralize = |n| if 1u64 == n { "" } else { "s" };
+                let pluralize = |n| if 1 == n { "" } else { "s" };
                 ccx.sess.span_fatal(sp,
                                     format!("transmute called on types with \
                                           different sizes: {} ({} bit{}) to \

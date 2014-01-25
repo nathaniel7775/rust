@@ -48,7 +48,7 @@ pub fn llsize_of_real(cx: &CrateContext, ty: Type) -> u64 {
         let nbits = llvm::LLVMSizeOfTypeInBits(cx.td.lltd, ty.to_ref()) as u64;
         if nbits & 7u64 != 0u64 {
             // Not an even number of bytes, spills into "next" byte.
-            1u64 + (nbits >> 3)
+            1 + (nbits >> 3)
         } else {
             nbits >> 3
         }
