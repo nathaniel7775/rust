@@ -1,4 +1,4 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -243,7 +243,7 @@ use vec::OwnedVector;
 use spsc = sync::spsc_queue;
 use mpsc = sync::mpsc_queue;
 
-pub use self::select::Select;
+pub use self::select::{Select, Handle};
 
 macro_rules! test (
     { fn $name:ident() $b:block $($a:attr)*} => (
@@ -367,7 +367,7 @@ struct Packet {
 // All implementations -- the fun part
 ///////////////////////////////////////////////////////////////////////////////
 
-static DISCONNECTED: int = int::min_value;
+static DISCONNECTED: int = int::MIN;
 static RESCHED_FREQ: int = 200;
 
 impl Packet {

@@ -1,4 +1,4 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,12 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// error-pattern:index out of bounds: the len is 3 but the index is
-
-use std::uint;
-use std::mem::size_of;
-
+// Useful for checking syscall usage of baseline scheduler usage
 fn main() {
-    let xs = [1, 2, 3];
-    xs[uint::MAX / size_of::<int>() + 1];
+    do spawn { }
 }
