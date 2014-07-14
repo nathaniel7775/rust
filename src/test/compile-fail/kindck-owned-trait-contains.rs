@@ -8,14 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+
 trait Repeat<A> { fn get(&self) -> A; }
 
 impl<A:Clone> Repeat<A> for A {
     fn get(&self) -> A { self.clone() }
 }
 
-fn repeater<A:Clone>(v: A) -> ~Repeat:<A> {
-    ~v as ~Repeat:<A> // No
+fn repeater<A:Clone>(v: A) -> Box<Repeat<A>> {
+    box v as Box<Repeat<A>> // No
 }
 
 fn main() {
@@ -23,8 +24,8 @@ fn main() {
     // ~Repeat<&'blk int> where blk is the lifetime of the block below.
 
     let y = {
-        let tmp0 = 3;
-        let tmp1 = &tmp0; //~ ERROR borrowed value does not live long enough
+        let tmp0 = 3i;
+        let tmp1 = &tmp0; //~ ERROR `tmp0` does not live long enough
         repeater(tmp1)
     };
     assert!(3 == *(y.get()));

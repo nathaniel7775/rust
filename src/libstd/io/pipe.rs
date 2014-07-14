@@ -13,13 +13,25 @@
 //! Currently these aren't particularly useful, there only exists bindings
 //! enough so that pipes can be created to child processes.
 
+#![allow(missing_doc)]
+
 use prelude::*;
-use io::{io_error, EndOfFile};
+
+use io::{IoResult, IoError};
 use libc;
+use os;
+use boxed::Box;
 use rt::rtio::{RtioPipe, LocalIo};
 
+/// A synchronous, in-memory pipe.
 pub struct PipeStream {
-    priv obj: ~RtioPipe,
+    /// The internal, opaque runtime pipe object.
+    obj: Box<RtioPipe + Send>,
+}
+
+pub struct PipePair {
+    pub reader: PipeStream,
+    pub writer: PipeStream,
 }
 
 impl PipeStream {
@@ -32,50 +44,76 @@ impl PipeStream {
     ///
     /// # Example
     ///
-    ///     use std::libc;
-    ///     use std::io::pipe;
+    /// ```rust
+    /// # #![allow(unused_must_use)]
+    /// extern crate libc;
     ///
+    /// use std::io::pipe::PipeStream;
+    ///
+    /// fn main() {
     ///     let mut pipe = PipeStream::open(libc::STDERR_FILENO);
-    ///     pipe.write(bytes!("Hello, stderr!"));
-    ///
-    /// # Failure
-    ///
-    /// If the pipe cannot be created, an error will be raised on the
-    /// `io_error` condition.
-    pub fn open(fd: libc::c_int) -> Option<PipeStream> {
+    ///     pipe.write(b"Hello, stderr!");
+    /// }
+    /// ```
+    pub fn open(fd: libc::c_int) -> IoResult<PipeStream> {
         LocalIo::maybe_raise(|io| {
             io.pipe_open(fd).map(|obj| PipeStream { obj: obj })
-        })
+        }).map_err(IoError::from_rtio_error)
     }
 
-    pub fn new(inner: ~RtioPipe) -> PipeStream {
+    #[doc(hidden)]
+    pub fn new(inner: Box<RtioPipe + Send>) -> PipeStream {
         PipeStream { obj: inner }
+    }
+
+    /// Creates a pair of in-memory OS pipes for a unidirectional communication
+    /// stream.
+    ///
+    /// The structure returned contains a reader and writer I/O object. Data
+    /// written to the writer can be read from the reader.
+    ///
+    /// # Errors
+    ///
+    /// This function can fail to succeed if the underlying OS has run out of
+    /// available resources to allocate a new pipe.
+    pub fn pair() -> IoResult<PipePair> {
+        struct Closer { fd: libc::c_int }
+
+        let os::Pipe { reader, writer } = try!(unsafe { os::pipe() });
+        let mut reader = Closer { fd: reader };
+        let mut writer = Closer { fd: writer };
+
+        let io_reader = try!(PipeStream::open(reader.fd));
+        reader.fd = -1;
+        let io_writer = try!(PipeStream::open(writer.fd));
+        writer.fd = -1;
+        return Ok(PipePair { reader: io_reader, writer: io_writer });
+
+        impl Drop for Closer {
+            fn drop(&mut self) {
+                if self.fd != -1 {
+                    let _ = unsafe { libc::close(self.fd) };
+                }
+            }
+        }
+    }
+}
+
+impl Clone for PipeStream {
+    fn clone(&self) -> PipeStream {
+        PipeStream { obj: self.obj.clone() }
     }
 }
 
 impl Reader for PipeStream {
-    fn read(&mut self, buf: &mut [u8]) -> Option<uint> {
-        match self.obj.read(buf) {
-            Ok(read) => Some(read),
-            Err(ioerr) => {
-                // EOF is indicated by returning None
-                if ioerr.kind != EndOfFile {
-                    io_error::cond.raise(ioerr);
-                }
-                return None;
-            }
-        }
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<uint> {
+        self.obj.read(buf).map_err(IoError::from_rtio_error)
     }
 }
 
 impl Writer for PipeStream {
-    fn write(&mut self, buf: &[u8]) {
-        match self.obj.write(buf) {
-            Ok(_) => (),
-            Err(ioerr) => {
-                io_error::cond.raise(ioerr);
-            }
-        }
+    fn write(&mut self, buf: &[u8]) -> IoResult<()> {
+        self.obj.write(buf).map_err(IoError::from_rtio_error)
     }
 }
 
@@ -85,18 +123,18 @@ mod test {
         use os;
         use io::pipe::PipeStream;
 
-        let os::Pipe { input, out } = os::pipe();
-        let out = PipeStream::open(out);
-        let mut input = PipeStream::open(input);
-        let (p, c) = Chan::new();
+        let os::Pipe { reader, writer } = unsafe { os::pipe().unwrap() };
+        let out = PipeStream::open(writer);
+        let mut input = PipeStream::open(reader);
+        let (tx, rx) = channel();
         spawn(proc() {
             let mut out = out;
-            out.write([10]);
-            p.recv(); // don't close the pipe until the other read has finished
+            out.write([10]).unwrap();
+            rx.recv(); // don't close the pipe until the other read has finished
         });
 
         let mut buf = [0, ..10];
-        input.read(buf);
-        c.send(());
+        input.read(buf).unwrap();
+        tx.send(());
     })
 }

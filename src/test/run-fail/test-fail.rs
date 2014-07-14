@@ -8,8 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// check-stdout
 // error-pattern:task 'test_foo' failed at
 // compile-flags: --test
+// ignore-pretty: does not work well with `--test`
 
 #[test]
 fn test_foo() {

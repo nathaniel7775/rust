@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(macro_rules)];
+#![feature(macro_rules)]
 
 macro_rules! ignored_item {
     () => {
@@ -22,8 +22,16 @@ macro_rules! ignored_expr {
     () => ( 1, 2 ) //~ ERROR macro expansion ignores token `,`
 }
 
+macro_rules! ignored_pat {
+    () => ( 1, 2 ) //~ ERROR macro expansion ignores token `,`
+}
+
 ignored_item!()
 
 fn main() {
     ignored_expr!()
+    match 1 {
+        ignored_pat!() => (),
+        _ => (),
+    }
 }

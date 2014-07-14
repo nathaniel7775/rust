@@ -8,31 +8,24 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
-#[forbid(heap_memory)];
-#[allow(dead_code)];
+#![feature(managed_boxes)]
+#![forbid(heap_memory)]
+#![allow(dead_code)]
+
+use std::gc::{Gc, GC};
 
 struct Foo {
-    x: @int //~ ERROR type uses managed
+    x: Gc<int>, //~ ERROR type uses managed
 }
 
-struct Bar { x: ~int } //~ ERROR type uses owned
+struct Bar { x: Box<int> } //~ ERROR type uses owned
 
 fn main() {
-    let _x : Bar = Bar {x : ~10}; //~ ERROR type uses owned
+    let _x : Bar = Bar {x : box 10i}; //~ ERROR type uses owned
 
-    @2; //~ ERROR type uses managed
-    @[1]; //~ ERROR type uses managed
-    //~^ ERROR type uses managed
-    fn f(_: @Clone) {} //~ ERROR type uses managed
-    @""; //~ ERROR type uses managed
-    //~^ ERROR type uses managed
+    box(GC) 2i; //~ ERROR type uses managed
 
-    ~2; //~ ERROR type uses owned
-    ~[1]; //~ ERROR type uses owned
-    //~^ ERROR type uses owned
-    fn g(_: ~Clone) {} //~ ERROR type uses owned
-    ~""; //~ ERROR type uses owned
-    //~^ ERROR type uses owned
+    box 2i; //~ ERROR type uses owned
+    fn g(_: Box<Clone>) {} //~ ERROR type uses owned
     proc() {}; //~ ERROR type uses owned
 }

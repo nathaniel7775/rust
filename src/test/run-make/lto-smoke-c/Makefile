@@ -1,11 +1,9 @@
 -include ../tools.mk
 
-ifneq ($(shell uname),Darwin)
-	EXTRAFLAGS := -lm -lrt -ldl -lpthread
-endif
+# Apparently older versions of GCC segfault if -g is passed...
+CC := $(CC:-g=)
 
 all:
-	$(RUSTC) foo.rs -Z gen-crate-map -Z lto
-	ln -s $(call STATICLIB,foo-*) $(call STATICLIB,foo)
-	$(CC) bar.c -lfoo -o $(call RUN,bar) $(EXTRAFLAGS) -lstdc++
+	$(RUSTC) foo.rs -Z lto
+	$(CC) bar.c -lfoo -o $(call RUN_BINFILE,bar) $(EXTRACFLAGS) -lstdc++
 	$(call RUN,bar)

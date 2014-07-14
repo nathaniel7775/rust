@@ -12,124 +12,162 @@ use ast::{Ident, Matcher_, Matcher, MatchTok, MatchNonterminal, MatchSeq};
 use ast::{TTDelim};
 use ast;
 use codemap::{Span, Spanned, DUMMY_SP};
-use ext::base::{AnyMacro, ExtCtxt, MacResult, MRAny, MRDef, MacroDef};
-use ext::base::{NormalTT, MacroExpander};
+use ext::base::{ExtCtxt, MacResult, MacroDef};
+use ext::base::{NormalTT, TTMacroExpander};
 use ext::base;
 use ext::tt::macro_parser::{Success, Error, Failure};
 use ext::tt::macro_parser::{NamedMatch, MatchedSeq, MatchedNonterminal};
 use ext::tt::macro_parser::{parse, parse_or_else};
-use parse::lexer::{new_tt_reader, Reader};
+use parse::lexer::new_tt_reader;
 use parse::parser::Parser;
 use parse::attr::ParserAttr;
-use parse::token::{get_ident_interner, special_idents, gensym_ident, ident_to_str};
+use parse::token::{special_idents, gensym_ident};
 use parse::token::{FAT_ARROW, SEMI, NtMatchers, NtTT, EOF};
+use parse::token;
 use print;
-use std::cell::RefCell;
 use util::small_vector::SmallVector;
 
-struct ParserAnyMacro {
-    parser: RefCell<Parser>,
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::gc::Gc;
+
+struct ParserAnyMacro<'a> {
+    parser: RefCell<Parser<'a>>,
 }
 
-impl ParserAnyMacro {
+impl<'a> ParserAnyMacro<'a> {
     /// Make sure we don't have any tokens left to parse, so we don't
     /// silently drop anything. `allow_semi` is so that "optional"
-    /// semilons at the end of normal expressions aren't complained
+    /// semicolons at the end of normal expressions aren't complained
     /// about e.g. the semicolon in `macro_rules! kapow( () => {
     /// fail!(); } )` doesn't get picked up by .parse_expr(), but it's
     /// allowed to be there.
     fn ensure_complete_parse(&self, allow_semi: bool) {
         let mut parser = self.parser.borrow_mut();
-        if allow_semi && parser.get().token == SEMI {
-            parser.get().bump()
+        if allow_semi && parser.token == SEMI {
+            parser.bump()
         }
-        if parser.get().token != EOF {
-            let token_str = parser.get().this_token_to_str();
+        if parser.token != EOF {
+            let token_str = parser.this_token_to_string();
             let msg = format!("macro expansion ignores token `{}` and any \
                                following",
                               token_str);
-            let span = parser.get().span;
-            parser.get().span_err(span, msg);
+            let span = parser.span;
+            parser.span_err(span, msg.as_slice());
         }
     }
 }
 
-impl AnyMacro for ParserAnyMacro {
-    fn make_expr(&self) -> @ast::Expr {
-        let ret = {
-            let mut parser = self.parser.borrow_mut();
-            parser.get().parse_expr()
-        };
+impl<'a> MacResult for ParserAnyMacro<'a> {
+    fn make_expr(&self) -> Option<Gc<ast::Expr>> {
+        let ret = self.parser.borrow_mut().parse_expr();
         self.ensure_complete_parse(true);
-        ret
+        Some(ret)
     }
-    fn make_items(&self) -> SmallVector<@ast::Item> {
+    fn make_pat(&self) -> Option<Gc<ast::Pat>> {
+        let ret = self.parser.borrow_mut().parse_pat();
+        self.ensure_complete_parse(false);
+        Some(ret)
+    }
+    fn make_items(&self) -> Option<SmallVector<Gc<ast::Item>>> {
         let mut ret = SmallVector::zero();
         loop {
             let mut parser = self.parser.borrow_mut();
-            let attrs = parser.get().parse_outer_attributes();
-            match parser.get().parse_item(attrs) {
+            // so... do outer attributes attached to the macro invocation
+            // just disappear? This question applies to make_methods, as
+            // well.
+            match parser.parse_item_with_outer_attributes() {
                 Some(item) => ret.push(item),
                 None => break
             }
         }
         self.ensure_complete_parse(false);
-        ret
+        Some(ret)
     }
-    fn make_stmt(&self) -> @ast::Stmt {
-        let ret = {
+
+    fn make_methods(&self) -> Option<SmallVector<Gc<ast::Method>>> {
+        let mut ret = SmallVector::zero();
+        loop {
             let mut parser = self.parser.borrow_mut();
-            let attrs = parser.get().parse_outer_attributes();
-            parser.get().parse_stmt(attrs)
-        };
+            match parser.token {
+                EOF => break,
+                _ => ret.push(parser.parse_method(None))
+            }
+        }
+        self.ensure_complete_parse(false);
+        Some(ret)
+    }
+
+    fn make_stmt(&self) -> Option<Gc<ast::Stmt>> {
+        let attrs = self.parser.borrow_mut().parse_outer_attributes();
+        let ret = self.parser.borrow_mut().parse_stmt(attrs);
         self.ensure_complete_parse(true);
-        ret
+        Some(ret)
     }
 }
 
 struct MacroRulesMacroExpander {
     name: Ident,
-    lhses: @~[@NamedMatch],
-    rhses: @~[@NamedMatch],
+    lhses: Vec<Rc<NamedMatch>>,
+    rhses: Vec<Rc<NamedMatch>>,
 }
 
-impl MacroExpander for MacroRulesMacroExpander {
+impl TTMacroExpander for MacroRulesMacroExpander {
     fn expand(&self,
               cx: &mut ExtCtxt,
               sp: Span,
               arg: &[ast::TokenTree])
-              -> MacResult {
-        generic_extension(cx, sp, self.name, arg, *self.lhses, *self.rhses)
+              -> Box<MacResult> {
+        generic_extension(cx,
+                          sp,
+                          self.name,
+                          arg,
+                          self.lhses.as_slice(),
+                          self.rhses.as_slice())
     }
 }
 
-// Given `lhses` and `rhses`, this is the new macro we create
+struct MacroRulesDefiner {
+    def: RefCell<Option<MacroDef>>
+}
+impl MacResult for MacroRulesDefiner {
+    fn make_def(&self) -> Option<MacroDef> {
+        Some(self.def.borrow_mut().take().expect("MacroRulesDefiner expanded twice"))
+    }
+}
+
+/// Given `lhses` and `rhses`, this is the new macro we create
 fn generic_extension(cx: &ExtCtxt,
                      sp: Span,
                      name: Ident,
                      arg: &[ast::TokenTree],
-                     lhses: &[@NamedMatch],
-                     rhses: &[@NamedMatch])
-                     -> MacResult {
+                     lhses: &[Rc<NamedMatch>],
+                     rhses: &[Rc<NamedMatch>])
+                     -> Box<MacResult> {
     if cx.trace_macros() {
-        println!("{}! \\{ {} \\}",
-                  cx.str_of(name),
-                  print::pprust::tt_to_str(&TTDelim(@arg.to_owned()),
-                                           get_ident_interner()));
+        println!("{}! {} {} {}",
+                 token::get_ident(name),
+                 "{",
+                 print::pprust::tt_to_string(&TTDelim(Rc::new(arg.iter()
+                                                              .map(|x| (*x).clone())
+                                                              .collect()))),
+                 "}");
     }
 
     // Which arm's failure should we report? (the one furthest along)
     let mut best_fail_spot = DUMMY_SP;
-    let mut best_fail_msg = ~"internal error: ran no matchers";
-
-    let s_d = cx.parse_sess().span_diagnostic;
+    let mut best_fail_msg = "internal error: ran no matchers".to_string();
 
     for (i, lhs) in lhses.iter().enumerate() { // try each arm's matchers
         match **lhs {
           MatchedNonterminal(NtMatchers(ref mtcs)) => {
-            // `none` is because we're not interpolating
-            let arg_rdr = new_tt_reader(s_d, None, arg.to_owned()) as @Reader;
-            match parse(cx.parse_sess(), cx.cfg(), arg_rdr, *mtcs) {
+            // `None` is because we're not interpolating
+            let arg_rdr = new_tt_reader(&cx.parse_sess().span_diagnostic,
+                                        None,
+                                        arg.iter()
+                                           .map(|x| (*x).clone())
+                                           .collect());
+            match parse(cx.parse_sess(), cx.cfg(), arg_rdr, mtcs.as_slice()) {
               Success(named_matches) => {
                 let rhs = match *rhses[i] {
                     // okay, what's your transcriber?
@@ -137,7 +175,10 @@ fn generic_extension(cx: &ExtCtxt,
                         match *tt {
                             // cut off delimiters; don't parse 'em
                             TTDelim(ref tts) => {
-                                (*tts).slice(1u,(*tts).len()-1u).to_owned()
+                                (*tts).slice(1u,(*tts).len()-1u)
+                                      .iter()
+                                      .map(|x| (*x).clone())
+                                      .collect()
                             }
                             _ => cx.span_fatal(
                                 sp, "macro rhs must be delimited")
@@ -146,36 +187,37 @@ fn generic_extension(cx: &ExtCtxt,
                     _ => cx.span_bug(sp, "bad thing in rhs")
                 };
                 // rhs has holes ( `$id` and `$(...)` that need filled)
-                let trncbr = new_tt_reader(s_d, Some(named_matches),
+                let trncbr = new_tt_reader(&cx.parse_sess().span_diagnostic,
+                                           Some(named_matches),
                                            rhs);
-                let p = Parser(cx.parse_sess(), cx.cfg(), trncbr as @Reader);
+                let p = Parser::new(cx.parse_sess(), cx.cfg(), box trncbr);
                 // Let the context choose how to interpret the result.
                 // Weird, but useful for X-macros.
-                return MRAny(@ParserAnyMacro {
+                return box ParserAnyMacro {
                     parser: RefCell::new(p),
-                } as @AnyMacro)
+                } as Box<MacResult>
               }
               Failure(sp, ref msg) => if sp.lo >= best_fail_spot.lo {
                 best_fail_spot = sp;
                 best_fail_msg = (*msg).clone();
               },
-              Error(sp, ref msg) => cx.span_fatal(sp, (*msg))
+              Error(sp, ref msg) => cx.span_fatal(sp, msg.as_slice())
             }
           }
           _ => cx.bug("non-matcher found in parsed lhses")
         }
     }
-    cx.span_fatal(best_fail_spot, best_fail_msg);
+    cx.span_fatal(best_fail_spot, best_fail_msg.as_slice());
 }
 
-// this procedure performs the expansion of the
-// macro_rules! macro. It parses the RHS and adds
-// an extension to the current context.
+/// This procedure performs the expansion of the
+/// macro_rules! macro. It parses the RHS and adds
+/// an extension to the current context.
 pub fn add_new_extension(cx: &mut ExtCtxt,
                          sp: Span,
                          name: Ident,
-                         arg: ~[ast::TokenTree])
-                         -> base::MacResult {
+                         arg: Vec<ast::TokenTree> )
+                         -> Box<base::MacResult> {
     // these spans won't matter, anyways
     fn ms(m: Matcher_) -> Matcher {
         Spanned {
@@ -191,45 +233,46 @@ pub fn add_new_extension(cx: &mut ExtCtxt,
     // The grammar for macro_rules! is:
     // $( $lhs:mtcs => $rhs:tt );+
     // ...quasiquoting this would be nice.
-    let argument_gram = ~[
-        ms(MatchSeq(~[
+    let argument_gram = vec!(
+        ms(MatchSeq(vec!(
             ms(MatchNonterminal(lhs_nm, special_idents::matchers, 0u)),
             ms(MatchTok(FAT_ARROW)),
-            ms(MatchNonterminal(rhs_nm, special_idents::tt, 1u)),
-        ], Some(SEMI), false, 0u, 2u)),
+            ms(MatchNonterminal(rhs_nm, special_idents::tt, 1u))), Some(SEMI), false, 0u, 2u)),
         //to phase into semicolon-termination instead of
         //semicolon-separation
-        ms(MatchSeq(~[ms(MatchTok(SEMI))], None, true, 2u, 2u))];
+        ms(MatchSeq(vec!(ms(MatchTok(SEMI))), None, true, 2u, 2u)));
 
 
     // Parse the macro_rules! invocation (`none` is for no interpolations):
-    let arg_reader = new_tt_reader(cx.parse_sess().span_diagnostic,
+    let arg_reader = new_tt_reader(&cx.parse_sess().span_diagnostic,
                                    None,
                                    arg.clone());
     let argument_map = parse_or_else(cx.parse_sess(),
                                      cx.cfg(),
-                                     arg_reader as @Reader,
+                                     arg_reader,
                                      argument_gram);
 
     // Extract the arguments:
     let lhses = match **argument_map.get(&lhs_nm) {
-        MatchedSeq(ref s, _) => /* FIXME (#2543) */ @(*s).clone(),
+        MatchedSeq(ref s, _) => /* FIXME (#2543) */ (*s).clone(),
         _ => cx.span_bug(sp, "wrong-structured lhs")
     };
 
     let rhses = match **argument_map.get(&rhs_nm) {
-        MatchedSeq(ref s, _) => /* FIXME (#2543) */ @(*s).clone(),
+        MatchedSeq(ref s, _) => /* FIXME (#2543) */ (*s).clone(),
         _ => cx.span_bug(sp, "wrong-structured rhs")
     };
 
-    let exp = ~MacroRulesMacroExpander {
+    let exp = box MacroRulesMacroExpander {
         name: name,
         lhses: lhses,
         rhses: rhses,
     };
 
-    return MRDef(MacroDef {
-        name: ident_to_str(&name),
-        ext: NormalTT(exp, Some(sp))
-    });
+    box MacroRulesDefiner {
+        def: RefCell::new(Some(MacroDef {
+            name: token::get_ident(name).to_string(),
+            ext: NormalTT(exp, Some(sp))
+        }))
+    } as Box<MacResult>
 }

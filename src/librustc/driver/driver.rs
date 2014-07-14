@@ -10,150 +10,165 @@
 
 
 use back::link;
-use back::{arm, x86, x86_64, mips};
-use driver::session::{Aggressive, OutputExecutable};
-use driver::session::{Session, Session_, No, Less, Default};
-use driver::session;
+use driver::session::Session;
+use driver::{config, PpMode};
+use driver::{PpmFlowGraph, PpmExpanded, PpmExpandedIdentified, PpmTyped};
+use driver::{PpmIdentified};
 use front;
-use lib::llvm::llvm;
 use lib::llvm::{ContextRef, ModuleRef};
+use lint;
 use metadata::common::LinkMeta;
-use metadata::{creader, filesearch};
-use metadata::cstore::CStore;
-use metadata::creader::Loader;
-use metadata;
-use middle::{trans, freevars, kind, ty, typeck, lint, astencode, reachable};
+use metadata::creader;
+use middle::cfg;
+use middle::cfg::graphviz::LabelledCFG;
+use middle::{trans, freevars, stability, kind, ty, typeck, reachable};
+use middle::dependency_format;
 use middle;
+use plugin::load::Plugins;
+use plugin::registry::Registry;
+use plugin;
+
 use util::common::time;
 use util::ppaux;
+use util::nodemap::{NodeSet};
 
-use std::cell::{Cell, RefCell};
-use std::hashmap::{HashMap,HashSet};
+use dot = graphviz;
+
+use serialize::{json, Encodable};
+
 use std::io;
 use std::io::fs;
 use std::io::MemReader;
-use std::os;
-use std::vec;
-use extra::getopts::groups::{optopt, optmulti, optflag, optflagopt};
-use extra::getopts;
 use syntax::ast;
-use syntax::abi;
 use syntax::attr;
 use syntax::attr::{AttrMetaMethods};
-use syntax::codemap;
-use syntax::diagnostic;
-use syntax::ext::base::CrateLoader;
+use syntax::diagnostics;
 use syntax::parse;
 use syntax::parse::token;
 use syntax::print::{pp, pprust};
 use syntax;
 
-pub enum PpMode {
-    PpmNormal,
-    PpmExpanded,
-    PpmTyped,
-    PpmIdentified,
-    PpmExpandedIdentified
+pub fn host_triple() -> &'static str {
+    // Get the host triple out of the build environment. This ensures that our
+    // idea of the host triple is the same as for the set of libraries we've
+    // actually built.  We can't just take LLVM's host triple because they
+    // normalize all ix86 architectures to i386.
+    //
+    // Instead of grabbing the host triple (for the current host), we grab (at
+    // compile time) the target triple that this rustc is built with and
+    // calling that (at runtime) the host triple.
+    (option_env!("CFG_COMPILER_HOST_TRIPLE")).
+        expect("CFG_COMPILER_HOST_TRIPLE")
+}
+
+pub fn compile_input(sess: Session,
+                     cfg: ast::CrateConfig,
+                     input: &Input,
+                     outdir: &Option<Path>,
+                     output: &Option<Path>) {
+    // We need nested scopes here, because the intermediate results can keep
+    // large chunks of memory alive and we want to free them as soon as
+    // possible to keep the peak memory usage low
+    let (outputs, trans, sess) = {
+        let (outputs, expanded_crate, ast_map, id) = {
+            let krate = phase_1_parse_input(&sess, cfg, input);
+            if stop_after_phase_1(&sess) { return; }
+            let outputs = build_output_filenames(input,
+                                                 outdir,
+                                                 output,
+                                                 krate.attrs.as_slice(),
+                                                 &sess);
+            let id = link::find_crate_name(Some(&sess), krate.attrs.as_slice(),
+                                           input);
+            let (expanded_crate, ast_map)
+                = match phase_2_configure_and_expand(&sess, krate, id.as_slice()) {
+                    None => return,
+                    Some(p) => p,
+                };
+
+            (outputs, expanded_crate, ast_map, id)
+        };
+        write_out_deps(&sess, input, &outputs, id.as_slice());
+
+        if stop_after_phase_2(&sess) { return; }
+
+        let analysis = phase_3_run_analysis_passes(sess, &expanded_crate,
+                                                   ast_map, id);
+        phase_save_analysis(&analysis.ty_cx.sess, &expanded_crate, &analysis, outdir);
+        if stop_after_phase_3(&analysis.ty_cx.sess) { return; }
+        let (tcx, trans) = phase_4_translate_to_llvm(expanded_crate, analysis);
+
+        // Discard interned strings as they are no longer required.
+        token::get_ident_interner().clear();
+
+        (outputs, trans, tcx.sess)
+    };
+    phase_5_run_llvm_passes(&sess, &trans, &outputs);
+    if stop_after_phase_5(&sess) { return; }
+    phase_6_link_output(&sess, &trans, &outputs);
 }
 
 /**
  * The name used for source code that doesn't originate in a file
  * (e.g. source from stdin or a string)
  */
-pub fn anon_src() -> @str { @"<anon>" }
+pub fn anon_src() -> String {
+    "<anon>".to_string()
+}
 
-pub fn source_name(input: &Input) -> @str {
+pub fn source_name(input: &Input) -> String {
     match *input {
-      // FIXME (#9639): This needs to handle non-utf8 paths
-      FileInput(ref ifile) => ifile.as_str().unwrap().to_managed(),
-      StrInput(_) => anon_src()
+        // FIXME (#9639): This needs to handle non-utf8 paths
+        FileInput(ref ifile) => ifile.as_str().unwrap().to_string(),
+        StrInput(_) => anon_src()
     }
-}
-
-pub fn default_configuration(sess: Session) ->
-   ast::CrateConfig {
-    let tos = match sess.targ_cfg.os {
-        abi::OsWin32 =>   @"win32",
-        abi::OsMacos =>   @"macos",
-        abi::OsLinux =>   @"linux",
-        abi::OsAndroid => @"android",
-        abi::OsFreebsd => @"freebsd"
-    };
-
-    // ARM is bi-endian, however using NDK seems to default
-    // to little-endian unless a flag is provided.
-    let (end,arch,wordsz) = match sess.targ_cfg.arch {
-        abi::X86 =>    (@"little", @"x86",    @"32"),
-        abi::X86_64 => (@"little", @"x86_64", @"64"),
-        abi::Arm =>    (@"little", @"arm",    @"32"),
-        abi::Mips =>   (@"big",    @"mips",   @"32")
-    };
-
-    let fam = match sess.targ_cfg.os {
-        abi::OsWin32 => @"windows",
-        _ => @"unix"
-    };
-
-    let mk = attr::mk_name_value_item_str;
-    return ~[ // Target bindings.
-         attr::mk_word_item(fam),
-         mk(@"target_os", tos),
-         mk(@"target_family", fam),
-         mk(@"target_arch", arch),
-         mk(@"target_endian", end),
-         mk(@"target_word_size", wordsz),
-    ];
-}
-
-pub fn append_configuration(cfg: &mut ast::CrateConfig, name: @str) {
-    if !cfg.iter().any(|mi| mi.name() == name) {
-        cfg.push(attr::mk_word_item(name))
-    }
-}
-
-pub fn build_configuration(sess: Session) ->
-   ast::CrateConfig {
-    // Combine the configuration requested by the session (command line) with
-    // some default and generated configuration items
-    let default_cfg = default_configuration(sess);
-    let mut user_cfg = sess.opts.cfg.clone();
-    // If the user wants a test runner, then add the test cfg
-    if sess.opts.test { append_configuration(&mut user_cfg, @"test") }
-    // If the user requested GC, then add the GC cfg
-    append_configuration(&mut user_cfg, if sess.opts.gc { @"gc" } else { @"nogc" });
-    return vec::append(user_cfg, default_cfg);
-}
-
-// Convert strings provided as --cfg [cfgspec] into a crate_cfg
-fn parse_cfgspecs(cfgspecs: ~[~str], demitter: @diagnostic::Emitter)
-                  -> ast::CrateConfig {
-    cfgspecs.move_iter().map(|s| {
-        let sess = parse::new_parse_sess(Some(demitter));
-        parse::parse_meta_from_source_str(@"cfgspec", s.to_managed(), ~[], sess)
-    }).collect::<ast::CrateConfig>()
 }
 
 pub enum Input {
     /// Load source from file
     FileInput(Path),
     /// The string is the source
-    // FIXME (#2319): Don't really want to box the source string
-    StrInput(@str)
+    StrInput(String)
 }
 
-pub fn phase_1_parse_input(sess: Session, cfg: ast::CrateConfig, input: &Input)
+impl Input {
+    fn filestem(&self) -> String {
+        match *self {
+            FileInput(ref ifile) => ifile.filestem_str().unwrap().to_string(),
+            StrInput(_) => "rust_out".to_string(),
+        }
+    }
+}
+
+
+pub fn phase_1_parse_input(sess: &Session, cfg: ast::CrateConfig, input: &Input)
     -> ast::Crate {
-    time(sess.time_passes(), "parsing", (), |_| {
+    let krate = time(sess.time_passes(), "parsing", (), |_| {
         match *input {
             FileInput(ref file) => {
-                parse::parse_crate_from_file(&(*file), cfg.clone(), sess.parse_sess)
+                parse::parse_crate_from_file(&(*file), cfg.clone(), &sess.parse_sess)
             }
-            StrInput(src) => {
-                parse::parse_crate_from_source_str(
-                    anon_src(), src, cfg.clone(), sess.parse_sess)
+            StrInput(ref src) => {
+                parse::parse_crate_from_source_str(anon_src().to_string(),
+                                                   src.to_string(),
+                                                   cfg.clone(),
+                                                   &sess.parse_sess)
             }
         }
-    })
+    });
+
+    if sess.opts.debugging_opts & config::AST_JSON_NOEXPAND != 0 {
+        let mut stdout = io::BufferedWriter::new(io::stdout());
+        let mut json = json::PrettyEncoder::new(&mut stdout);
+        // unwrapping so IoError isn't ignored
+        krate.encode(&mut json).unwrap();
+    }
+
+    if sess.show_span() {
+        front::show_span::run(sess, &krate);
+    }
+
+    krate
 }
 
 // For continuing compilation after a parsed crate has been
@@ -163,21 +178,24 @@ pub fn phase_1_parse_input(sess: Session, cfg: ast::CrateConfig, input: &Input)
 /// syntax expansion, secondary `cfg` expansion, synthesis of a test
 /// harness if one is to be provided and injection of a dependency on the
 /// standard library and prelude.
-pub fn phase_2_configure_and_expand(sess: Session,
-                                    cfg: ast::CrateConfig,
-                                    loader: &mut CrateLoader,
-                                    mut crate: ast::Crate)
-                                    -> (ast::Crate, syntax::ast_map::Map) {
+///
+/// Returns `None` if we're aborting after handling -W help.
+pub fn phase_2_configure_and_expand(sess: &Session,
+                                    mut krate: ast::Crate,
+                                    crate_name: &str)
+                                    -> Option<(ast::Crate, syntax::ast_map::Map)> {
     let time_passes = sess.time_passes();
 
-    sess.building_library.set(session::building_library(sess.opts, &crate));
-    sess.outputs.set(session::collect_outputs(&sess, crate.attrs));
+    *sess.crate_types.borrow_mut() =
+        collect_crate_types(sess, krate.attrs.as_slice());
+    *sess.crate_metadata.borrow_mut() =
+        collect_crate_metadata(sess, krate.attrs.as_slice());
 
     time(time_passes, "gated feature checking", (), |_|
-         front::feature_gate::check_crate(sess, &crate));
+         front::feature_gate::check_crate(sess, &krate));
 
-    crate = time(time_passes, "crate injection", crate, |crate|
-                 front::std_inject::maybe_inject_crates_ref(sess, crate));
+    krate = time(time_passes, "crate injection", krate, |krate|
+                 front::std_inject::maybe_inject_crates_ref(sess, krate));
 
     // strip before expansion to allow macros to depend on
     // configuration variables e.g/ in
@@ -187,57 +205,123 @@ pub fn phase_2_configure_and_expand(sess: Session,
     //
     // baz! should not use this definition unless foo is enabled.
 
-    crate = time(time_passes, "configuration 1", crate, |crate|
-                 front::config::strip_unconfigured_items(crate));
+    krate = time(time_passes, "configuration 1", krate, |krate|
+                 front::config::strip_unconfigured_items(krate));
 
-    crate = time(time_passes, "expansion", crate, |crate| {
-        syntax::ext::expand::expand_crate(sess.parse_sess,
-                                          loader,
-                                          cfg.clone(),
-                                          crate)
+    let Plugins { macros, registrars }
+        = time(time_passes, "plugin loading", (), |_|
+               plugin::load::load_plugins(sess, &krate));
+
+    let mut registry = Registry::new(&krate);
+
+    time(time_passes, "plugin registration", (), |_| {
+        if sess.features.rustc_diagnostic_macros.get() {
+            registry.register_macro("__diagnostic_used",
+                diagnostics::plugin::expand_diagnostic_used);
+            registry.register_macro("__register_diagnostic",
+                diagnostics::plugin::expand_register_diagnostic);
+            registry.register_macro("__build_diagnostic_array",
+                diagnostics::plugin::expand_build_diagnostic_array);
+        }
+
+        for &registrar in registrars.iter() {
+            registrar(&mut registry);
+        }
     });
-    // dump the syntax-time crates
-    sess.cstore.reset();
+
+    let Registry { syntax_exts, lint_passes, .. } = registry;
+
+    {
+        let mut ls = sess.lint_store.borrow_mut();
+        for pass in lint_passes.move_iter() {
+            ls.register_pass(Some(sess), true, pass);
+        }
+    }
+
+    // Lint plugins are registered; now we can process command line flags.
+    if sess.opts.describe_lints {
+        super::describe_lints(&*sess.lint_store.borrow(), true);
+        return None;
+    }
+    sess.lint_store.borrow_mut().process_command_line(sess);
+
+    // Abort if there are errors from lint processing or a plugin registrar.
+    sess.abort_if_errors();
+
+    krate = time(time_passes, "expansion", (krate, macros, syntax_exts),
+        |(krate, macros, syntax_exts)| {
+            // Windows dlls do not have rpaths, so they don't know how to find their
+            // dependencies. It's up to us to tell the system where to find all the
+            // dependent dlls. Note that this uses cfg!(windows) as opposed to
+            // targ_cfg because syntax extensions are always loaded for the host
+            // compiler, not for the target.
+            if cfg!(windows) {
+                sess.host_filesearch().add_dylib_search_paths();
+            }
+            let cfg = syntax::ext::expand::ExpansionConfig {
+                deriving_hash_type_parameter: sess.features.default_type_params.get(),
+                crate_name: crate_name.to_string(),
+            };
+            syntax::ext::expand::expand_crate(&sess.parse_sess,
+                                              cfg,
+                                              macros,
+                                              syntax_exts,
+                                              krate)
+        }
+    );
+
+    // JBC: make CFG processing part of expansion to avoid this problem:
 
     // strip again, in case expansion added anything with a #[cfg].
-    crate = time(time_passes, "configuration 2", crate, |crate|
-                 front::config::strip_unconfigured_items(crate));
+    krate = time(time_passes, "configuration 2", krate, |krate|
+                 front::config::strip_unconfigured_items(krate));
 
-    crate = time(time_passes, "maybe building test harness", crate, |crate|
-                 front::test::modify_for_testing(sess, crate));
+    krate = time(time_passes, "maybe building test harness", krate, |krate|
+                 front::test::modify_for_testing(sess, krate));
 
-    crate = time(time_passes, "prelude injection", crate, |crate|
-                 front::std_inject::maybe_inject_prelude(sess, crate));
+    krate = time(time_passes, "prelude injection", krate, |krate|
+                 front::std_inject::maybe_inject_prelude(sess, krate));
 
-    time(time_passes, "assinging node ids and indexing ast", crate, |crate|
-         front::assign_node_ids_and_map::assign_node_ids_and_map(sess, crate))
+    let (krate, map) = time(time_passes, "assigning node ids and indexing ast", krate, |krate|
+         front::assign_node_ids_and_map::assign_node_ids_and_map(sess, krate));
+
+    if sess.opts.debugging_opts & config::AST_JSON != 0 {
+        let mut stdout = io::BufferedWriter::new(io::stdout());
+        let mut json = json::PrettyEncoder::new(&mut stdout);
+        // unwrapping so IoError isn't ignored
+        krate.encode(&mut json).unwrap();
+    }
+
+    time(time_passes, "checking that all macro invocations are gone", &krate, |krate|
+         syntax::ext::expand::check_for_macros(&sess.parse_sess, krate));
+
+    Some((krate, map))
 }
 
 pub struct CrateAnalysis {
-    exp_map2: middle::resolve::ExportMap2,
-    exported_items: middle::privacy::ExportedItems,
-    public_items: middle::privacy::PublicItems,
-    ty_cx: ty::ctxt,
-    maps: astencode::Maps,
-    reachable: @RefCell<HashSet<ast::NodeId>>
+    pub exp_map2: middle::resolve::ExportMap2,
+    pub exported_items: middle::privacy::ExportedItems,
+    pub public_items: middle::privacy::PublicItems,
+    pub ty_cx: ty::ctxt,
+    pub reachable: NodeSet,
+    pub name: String,
 }
+
 
 /// Run the resolution, typechecking, region checking and other
 /// miscellaneous analysis passes on the crate. Return various
 /// structures carrying the results of the analysis.
 pub fn phase_3_run_analysis_passes(sess: Session,
-                                   crate: &ast::Crate,
-                                   ast_map: syntax::ast_map::Map) -> CrateAnalysis {
-
+                                   krate: &ast::Crate,
+                                   ast_map: syntax::ast_map::Map,
+                                   name: String) -> CrateAnalysis {
     let time_passes = sess.time_passes();
 
     time(time_passes, "external crate/lib resolution", (), |_|
-         creader::read_crates(sess, crate,
-                              session::sess_os_to_meta_os(sess.targ_cfg.os),
-                              token::get_ident_interner()));
+         creader::read_crates(&sess, krate));
 
     let lang_items = time(time_passes, "language item collection", (), |_|
-                          middle::lang_items::collect_language_items(crate, sess));
+                          middle::lang_items::collect_language_items(krate, &sess));
 
     let middle::resolve::CrateMap {
         def_map: def_map,
@@ -247,171 +331,172 @@ pub fn phase_3_run_analysis_passes(sess: Session,
         last_private_map: last_private_map
     } =
         time(time_passes, "resolution", (), |_|
-             middle::resolve::resolve_crate(sess, lang_items, crate));
+             middle::resolve::resolve_crate(&sess, &lang_items, krate));
+
+    // Discard MTWT tables that aren't required past resolution.
+    syntax::ext::mtwt::clear_tables();
 
     let named_region_map = time(time_passes, "lifetime resolution", (),
-                                |_| middle::resolve_lifetime::crate(sess, crate));
+                                |_| middle::resolve_lifetime::krate(&sess, krate));
 
     time(time_passes, "looking for entry point", (),
-         |_| middle::entry::find_entry_point(sess, crate, ast_map));
+         |_| middle::entry::find_entry_point(&sess, krate, &ast_map));
 
-    sess.macro_registrar_fn.with_mut(|r| *r =
-        time(time_passes, "looking for macro registrar", (), |_|
-            syntax::ext::registrar::find_macro_registrar(
-                sess.span_diagnostic, crate)));
+    sess.plugin_registrar_fn.set(
+        time(time_passes, "looking for plugin registrar", (), |_|
+            plugin::build::find_plugin_registrar(
+                sess.diagnostic(), krate)));
 
     let freevars = time(time_passes, "freevar finding", (), |_|
-                        freevars::annotate_freevars(def_map, crate));
+                        freevars::annotate_freevars(&def_map, krate));
 
     let region_map = time(time_passes, "region resolution", (), |_|
-                          middle::region::resolve_crate(sess, crate));
+                          middle::region::resolve_crate(&sess, krate));
 
-    let ty_cx = ty::mk_ctxt(sess, def_map, named_region_map, ast_map, freevars,
-                            region_map, lang_items);
+    time(time_passes, "loop checking", (), |_|
+         middle::check_loop::check_crate(&sess, krate));
+
+    let stability_index = time(time_passes, "stability index", (), |_|
+                               stability::Index::build(krate));
+
+    let ty_cx = ty::mk_ctxt(sess, def_map, named_region_map, ast_map,
+                            freevars, region_map, lang_items, stability_index);
 
     // passes are timed inside typeck
-    let (method_map, vtable_map) = typeck::check_crate(ty_cx, trait_map, crate);
+    typeck::check_crate(&ty_cx, trait_map, krate);
+
+    time(time_passes, "check static items", (), |_|
+         middle::check_static::check_crate(&ty_cx, krate));
 
     // These next two const passes can probably be merged
     time(time_passes, "const marking", (), |_|
-         middle::const_eval::process_crate(crate, ty_cx));
+         middle::const_eval::process_crate(krate, &ty_cx));
 
     time(time_passes, "const checking", (), |_|
-         middle::check_const::check_crate(sess, crate, ast_map, def_map,
-                                          method_map, ty_cx));
+         middle::check_const::check_crate(krate, &ty_cx));
 
     let maps = (external_exports, last_private_map);
     let (exported_items, public_items) =
             time(time_passes, "privacy checking", maps, |(a, b)|
-                 middle::privacy::check_crate(ty_cx, &method_map, &exp_map2,
-                                              a, b, crate));
+                 middle::privacy::check_crate(&ty_cx, &exp_map2, a, b, krate));
+
+    time(time_passes, "intrinsic checking", (), |_|
+         middle::intrinsicck::check_crate(&ty_cx, krate));
 
     time(time_passes, "effect checking", (), |_|
-         middle::effect::check_crate(ty_cx, method_map, crate));
-
-    time(time_passes, "loop checking", (), |_|
-         middle::check_loop::check_crate(ty_cx, crate));
-
-    let middle::moves::MoveMaps {moves_map, moved_variables_set,
-                                 capture_map} =
-        time(time_passes, "compute moves", (), |_|
-             middle::moves::compute_moves(ty_cx, method_map, crate));
+         middle::effect::check_crate(&ty_cx, krate));
 
     time(time_passes, "match checking", (), |_|
-         middle::check_match::check_crate(ty_cx, method_map,
-                                          moves_map, crate));
+         middle::check_match::check_crate(&ty_cx, krate));
 
     time(time_passes, "liveness checking", (), |_|
-         middle::liveness::check_crate(ty_cx, method_map,
-                                       capture_map, crate));
+         middle::liveness::check_crate(&ty_cx, krate));
 
-    let root_map =
-        time(time_passes, "borrow checking", (), |_|
-             middle::borrowck::check_crate(ty_cx, method_map,
-                                           moves_map, moved_variables_set,
-                                           capture_map, crate));
+    time(time_passes, "borrow checking", (), |_|
+         middle::borrowck::check_crate(&ty_cx, krate));
 
     time(time_passes, "kind checking", (), |_|
-         kind::check_crate(ty_cx, method_map, crate));
+         kind::check_crate(&ty_cx, krate));
 
     let reachable_map =
         time(time_passes, "reachability checking", (), |_|
-             reachable::find_reachable(ty_cx, method_map, &exported_items));
+             reachable::find_reachable(&ty_cx, &exported_items));
 
-    {
-        let reachable_map = reachable_map.borrow();
-        time(time_passes, "death checking", (), |_| {
-             middle::dead::check_crate(ty_cx,
-                                       method_map,
-                                       &exported_items,
-                                       reachable_map.get(),
-                                       crate)
-        });
-    }
+    time(time_passes, "death checking", (), |_| {
+        middle::dead::check_crate(&ty_cx,
+                                  &exported_items,
+                                  &reachable_map,
+                                  krate)
+    });
 
     time(time_passes, "lint checking", (), |_|
-         lint::check_crate(ty_cx, method_map, &exported_items, crate));
+         lint::check_crate(&ty_cx, krate, &exported_items));
 
     CrateAnalysis {
         exp_map2: exp_map2,
         ty_cx: ty_cx,
         exported_items: exported_items,
         public_items: public_items,
-        maps: astencode::Maps {
-            root_map: root_map,
-            method_map: method_map,
-            vtable_map: vtable_map,
-            capture_map: capture_map
-        },
-        reachable: reachable_map
+        reachable: reachable_map,
+        name: name,
     }
 }
 
+pub fn phase_save_analysis(sess: &Session,
+                           krate: &ast::Crate,
+                           analysis: &CrateAnalysis,
+                           odir: &Option<Path>) {
+    if (sess.opts.debugging_opts & config::SAVE_ANALYSIS) == 0 {
+        return;
+    }
+    time(sess.time_passes(), "save analysis", krate, |krate|
+         middle::save::process_crate(sess, krate, analysis, odir));
+}
+
 pub struct CrateTranslation {
-    context: ContextRef,
-    module: ModuleRef,
-    metadata_module: ModuleRef,
-    link: LinkMeta,
-    metadata: ~[u8],
-    reachable: ~[~str],
+    pub context: ContextRef,
+    pub module: ModuleRef,
+    pub metadata_module: ModuleRef,
+    pub link: LinkMeta,
+    pub metadata: Vec<u8>,
+    pub reachable: Vec<String>,
+    pub crate_formats: dependency_format::Dependencies,
+    pub no_builtins: bool,
 }
 
 /// Run the translation phase to LLVM, after which the AST and analysis can
 /// be discarded.
-pub fn phase_4_translate_to_llvm(sess: Session,
-                                 crate: ast::Crate,
-                                 analysis: &CrateAnalysis,
-                                 outputs: &OutputFilenames) -> CrateTranslation {
-    time(sess.time_passes(), "translation", crate, |crate|
-         trans::base::trans_crate(sess, crate, analysis,
-                                  &outputs.obj_filename))
+pub fn phase_4_translate_to_llvm(krate: ast::Crate,
+                                 analysis: CrateAnalysis) -> (ty::ctxt, CrateTranslation) {
+    let time_passes = analysis.ty_cx.sess.time_passes();
+
+    time(time_passes, "resolving dependency formats", (), |_|
+         dependency_format::calculate(&analysis.ty_cx));
+
+    // Option dance to work around the lack of stack once closures.
+    time(time_passes, "translation", (krate, analysis), |(krate, analysis)|
+         trans::base::trans_crate(krate, analysis))
 }
 
 /// Run LLVM itself, producing a bitcode file, assembly file or object file
 /// as a side effect.
-pub fn phase_5_run_llvm_passes(sess: Session,
+pub fn phase_5_run_llvm_passes(sess: &Session,
                                trans: &CrateTranslation,
                                outputs: &OutputFilenames) {
-
-    if sess.no_integrated_as() {
+    if sess.opts.cg.no_integrated_as {
         let output_type = link::OutputTypeAssembly;
-        let asm_filename = outputs.obj_filename.with_extension("s");
 
         time(sess.time_passes(), "LLVM passes", (), |_|
-            link::write::run_passes(sess,
-                                    trans,
-                                    output_type,
-                                    &asm_filename));
+            link::write::run_passes(sess, trans, [output_type], outputs));
 
-        link::write::run_assembler(sess, &asm_filename, &outputs.obj_filename);
+        link::write::run_assembler(sess, outputs);
 
         // Remove assembly source, unless --save-temps was specified
-        if !sess.opts.save_temps {
-            fs::unlink(&asm_filename);
+        if !sess.opts.cg.save_temps {
+            fs::unlink(&outputs.temp_path(link::OutputTypeAssembly)).unwrap();
         }
     } else {
         time(sess.time_passes(), "LLVM passes", (), |_|
             link::write::run_passes(sess,
                                     trans,
-                                    sess.opts.output_type,
-                                    &outputs.obj_filename));
+                                    sess.opts.output_types.as_slice(),
+                                    outputs));
     }
 }
 
 /// Run the linker on any artifacts that resulted from the LLVM run.
 /// This should produce either a finished executable or library.
-pub fn phase_6_link_output(sess: Session,
+pub fn phase_6_link_output(sess: &Session,
                            trans: &CrateTranslation,
                            outputs: &OutputFilenames) {
     time(sess.time_passes(), "linking", (), |_|
          link::link_binary(sess,
                            trans,
-                           &outputs.obj_filename,
-                           &outputs.out_filename,
-                           &trans.link));
+                           outputs,
+                           trans.link.crate_name.as_slice()));
 }
 
-pub fn stop_after_phase_3(sess: Session) -> bool {
+pub fn stop_after_phase_3(sess: &Session) -> bool {
    if sess.opts.no_trans {
         debug!("invoked with --no-trans, returning early from compile_input");
         return true;
@@ -419,140 +504,126 @@ pub fn stop_after_phase_3(sess: Session) -> bool {
     return false;
 }
 
-pub fn stop_after_phase_1(sess: Session) -> bool {
+pub fn stop_after_phase_1(sess: &Session) -> bool {
     if sess.opts.parse_only {
         debug!("invoked with --parse-only, returning early from compile_input");
         return true;
     }
-    return false;
+    if sess.show_span() {
+        return true;
+    }
+    return sess.opts.debugging_opts & config::AST_JSON_NOEXPAND != 0;
 }
 
-pub fn stop_after_phase_2(sess: Session) -> bool {
+pub fn stop_after_phase_2(sess: &Session) -> bool {
     if sess.opts.no_analysis {
         debug!("invoked with --no-analysis, returning early from compile_input");
         return true;
     }
-    return false;
+    return sess.opts.debugging_opts & config::AST_JSON != 0;
 }
 
-pub fn stop_after_phase_5(sess: Session) -> bool {
-    if sess.opts.output_type != link::OutputTypeExe {
+pub fn stop_after_phase_5(sess: &Session) -> bool {
+    if !sess.opts.output_types.iter().any(|&i| i == link::OutputTypeExe) {
         debug!("not building executable, returning early from compile_input");
         return true;
     }
     return false;
 }
 
-fn write_out_deps(sess: Session, input: &Input, outputs: &OutputFilenames, crate: &ast::Crate)
-{
-    let lm = link::build_link_meta(sess, crate.attrs, &outputs.obj_filename,
-                                       &mut ::util::sha2::Sha256::new());
+fn write_out_deps(sess: &Session,
+                  input: &Input,
+                  outputs: &OutputFilenames,
+                  id: &str) {
 
-    let sess_outputs = sess.outputs.borrow();
-    let out_filenames = sess_outputs.get().iter()
-        .map(|&output| link::filename_for_input(&sess, output, &lm, &outputs.out_filename))
-        .to_owned_vec();
+    let mut out_filenames = Vec::new();
+    for output_type in sess.opts.output_types.iter() {
+        let file = outputs.path(*output_type);
+        match *output_type {
+            link::OutputTypeExe => {
+                for output in sess.crate_types.borrow().iter() {
+                    let p = link::filename_for_input(sess, *output,
+                                                     id, &file);
+                    out_filenames.push(p);
+                }
+            }
+            _ => { out_filenames.push(file); }
+        }
+    }
 
-    // Write out dependency rules to the dep-info file if requested with --dep-info
+    // Write out dependency rules to the dep-info file if requested with
+    // --dep-info
     let deps_filename = match sess.opts.write_dependency_info {
         // Use filename from --dep-file argument if given
         (true, Some(ref filename)) => filename.clone(),
-        // Use default filename: crate source filename with extension replaced by ".d"
+        // Use default filename: crate source filename with extension replaced
+        // by ".d"
         (true, None) => match *input {
-            FileInput(ref input_path) => {
-                let filestem = input_path.filestem().expect("input file must have stem");
-                let filename = out_filenames[0].dir_path().join(filestem).with_extension("d");
-                filename
-            },
+            FileInput(..) => outputs.with_extension("d"),
             StrInput(..) => {
-                sess.warn("can not write --dep-info without a filename when compiling stdin.");
-                return;
+                sess.warn("can not write --dep-info without a filename \
+                           when compiling stdin.");
+                return
             },
         },
         _ => return,
     };
 
-    // Build a list of files used to compile the output and
-    // write Makefile-compatible dependency rules
-    let files: ~[@str] = {
-        let files = sess.codemap.files.borrow();
-        files.get()
-             .iter()
-             .filter_map(|fmap| {
-                 if fmap.is_real_file() {
-                     Some(fmap.name)
-                 } else {
-                     None
-                 }
-             })
-             .collect()
-    };
-    let mut file = io::File::create(&deps_filename);
-    for path in out_filenames.iter() {
-        write!(&mut file as &mut Writer,
-               "{}: {}\n\n", path.display(), files.connect(" "));
-    }
-}
+    let result = (|| {
+        // Build a list of files used to compile the output and
+        // write Makefile-compatible dependency rules
+        let files: Vec<String> = sess.codemap().files.borrow()
+                                   .iter().filter(|fmap| fmap.is_real_file())
+                                   .map(|fmap| fmap.name.to_string())
+                                   .collect();
+        let mut file = try!(io::File::create(&deps_filename));
+        for path in out_filenames.iter() {
+            try!(write!(&mut file as &mut Writer,
+                          "{}: {}\n\n", path.display(), files.connect(" ")));
+        }
+        Ok(())
+    })();
 
-pub fn compile_input(sess: Session, cfg: ast::CrateConfig, input: &Input,
-                     outdir: &Option<Path>, output: &Option<Path>) {
-    // We need nested scopes here, because the intermediate results can keep
-    // large chunks of memory alive and we want to free them as soon as
-    // possible to keep the peak memory usage low
-    let (outputs, trans) = {
-        let (expanded_crate, ast_map) = {
-            let crate = phase_1_parse_input(sess, cfg.clone(), input);
-            if stop_after_phase_1(sess) { return; }
-            let loader = &mut Loader::new(sess);
-            phase_2_configure_and_expand(sess, cfg, loader, crate)
-        };
-        let outputs = build_output_filenames(input, outdir, output,
-                                             expanded_crate.attrs, sess);
-
-        write_out_deps(sess, input, outputs, &expanded_crate);
-
-        if stop_after_phase_2(sess) { return; }
-
-        let analysis = phase_3_run_analysis_passes(sess, &expanded_crate, ast_map);
-        if stop_after_phase_3(sess) { return; }
-        let trans = phase_4_translate_to_llvm(sess, expanded_crate,
-                                              &analysis, outputs);
-        (outputs, trans)
-    };
-    phase_5_run_llvm_passes(sess, &trans, outputs);
-    if stop_after_phase_5(sess) { return; }
-    phase_6_link_output(sess, &trans, outputs);
-}
-
-struct IdentifiedAnnotation {
-    contents: (),
-}
-
-impl pprust::PpAnn for IdentifiedAnnotation {
-    fn pre(&self, node: pprust::AnnNode) {
-        match node {
-            pprust::NodeExpr(s, _) => pprust::popen(s),
-            _ => ()
+    match result {
+        Ok(()) => {}
+        Err(e) => {
+            sess.fatal(format!("error writing dependencies to `{}`: {}",
+                               deps_filename.display(), e).as_slice());
         }
     }
-    fn post(&self, node: pprust::AnnNode) {
+}
+
+struct IdentifiedAnnotation;
+
+impl pprust::PpAnn for IdentifiedAnnotation {
+    fn pre(&self,
+           s: &mut pprust::State,
+           node: pprust::AnnNode) -> io::IoResult<()> {
         match node {
-            pprust::NodeItem(s, item) => {
-                pp::space(&mut s.s);
-                pprust::synth_comment(s, item.id.to_str());
+            pprust::NodeExpr(_) => s.popen(),
+            _ => Ok(())
+        }
+    }
+    fn post(&self,
+            s: &mut pprust::State,
+            node: pprust::AnnNode) -> io::IoResult<()> {
+        match node {
+            pprust::NodeItem(item) => {
+                try!(pp::space(&mut s.s));
+                s.synth_comment(item.id.to_string())
             }
-            pprust::NodeBlock(s, blk) => {
-                pp::space(&mut s.s);
-                pprust::synth_comment(s, ~"block " + blk.id.to_str());
+            pprust::NodeBlock(blk) => {
+                try!(pp::space(&mut s.s));
+                s.synth_comment(format!("block {}", blk.id))
             }
-            pprust::NodeExpr(s, expr) => {
-                pp::space(&mut s.s);
-                pprust::synth_comment(s, expr.id.to_str());
-                pprust::pclose(s);
+            pprust::NodeExpr(expr) => {
+                try!(pp::space(&mut s.s));
+                try!(s.synth_comment(expr.id.to_string()));
+                s.pclose()
             }
-            pprust::NodePat(s, pat) => {
-                pp::space(&mut s.s);
-                pprust::synth_comment(s, ~"pat " + pat.id.to_str());
+            pprust::NodePat(pat) => {
+                try!(pp::space(&mut s.s));
+                s.synth_comment(format!("pat {}", pat.id))
             }
         }
     }
@@ -563,23 +634,30 @@ struct TypedAnnotation {
 }
 
 impl pprust::PpAnn for TypedAnnotation {
-    fn pre(&self, node: pprust::AnnNode) {
+    fn pre(&self,
+           s: &mut pprust::State,
+           node: pprust::AnnNode) -> io::IoResult<()> {
         match node {
-            pprust::NodeExpr(s, _) => pprust::popen(s),
-            _ => ()
+            pprust::NodeExpr(_) => s.popen(),
+            _ => Ok(())
         }
     }
-    fn post(&self, node: pprust::AnnNode) {
-        let tcx = self.analysis.ty_cx;
+    fn post(&self,
+            s: &mut pprust::State,
+            node: pprust::AnnNode) -> io::IoResult<()> {
+        let tcx = &self.analysis.ty_cx;
         match node {
-            pprust::NodeExpr(s, expr) => {
-                pp::space(&mut s.s);
-                pp::word(&mut s.s, "as");
-                pp::space(&mut s.s);
-                pp::word(&mut s.s, ppaux::ty_to_str(tcx, ty::expr_ty(tcx, expr)));
-                pprust::pclose(s);
+            pprust::NodeExpr(expr) => {
+                try!(pp::space(&mut s.s));
+                try!(pp::word(&mut s.s, "as"));
+                try!(pp::space(&mut s.s));
+                try!(pp::word(&mut s.s,
+                              ppaux::ty_to_string(
+                                  tcx,
+                                  ty::expr_ty(tcx, expr)).as_slice()));
+                s.pclose()
             }
-            _ => ()
+            _ => Ok(())
         }
     }
 }
@@ -587,622 +665,298 @@ impl pprust::PpAnn for TypedAnnotation {
 pub fn pretty_print_input(sess: Session,
                           cfg: ast::CrateConfig,
                           input: &Input,
-                          ppm: PpMode) {
-    let crate = phase_1_parse_input(sess, cfg.clone(), input);
+                          ppm: PpMode,
+                          ofile: Option<Path>) {
+    let krate = phase_1_parse_input(&sess, cfg, input);
+    let id = link::find_crate_name(Some(&sess), krate.attrs.as_slice(), input);
 
-    let (crate, ast_map, is_expanded) = match ppm {
-        PpmExpanded | PpmExpandedIdentified | PpmTyped => {
-            let loader = &mut Loader::new(sess);
-            let (crate, ast_map) = phase_2_configure_and_expand(sess, cfg, loader, crate);
-            (crate, Some(ast_map), true)
+    let (krate, ast_map, is_expanded) = match ppm {
+        PpmExpanded | PpmExpandedIdentified | PpmTyped | PpmFlowGraph(_) => {
+            let (krate, ast_map)
+                = match phase_2_configure_and_expand(&sess, krate,
+                                                     id.as_slice()) {
+                    None => return,
+                    Some(p) => p,
+                };
+            (krate, Some(ast_map), true)
         }
-        _ => (crate, None, false)
+        _ => (krate, None, false)
     };
 
-    let annotation = match ppm {
+    let src_name = source_name(input);
+    let src = Vec::from_slice(sess.codemap()
+                                  .get_filemap(src_name.as_slice())
+                                  .src
+                                  .as_bytes());
+    let mut rdr = MemReader::new(src);
+
+    let out = match ofile {
+        None => box io::stdout() as Box<Writer>,
+        Some(p) => {
+            let r = io::File::create(&p);
+            match r {
+                Ok(w) => box w as Box<Writer>,
+                Err(e) => fail!("print-print failed to open {} due to {}",
+                                p.display(), e),
+            }
+        }
+    };
+    match ppm {
         PpmIdentified | PpmExpandedIdentified => {
-            @IdentifiedAnnotation {
-                contents: (),
-            } as @pprust::PpAnn
+            pprust::print_crate(sess.codemap(),
+                                sess.diagnostic(),
+                                &krate,
+                                src_name.to_string(),
+                                &mut rdr,
+                                out,
+                                &IdentifiedAnnotation,
+                                is_expanded)
         }
         PpmTyped => {
             let ast_map = ast_map.expect("--pretty=typed missing ast_map");
-            let analysis = phase_3_run_analysis_passes(sess, &crate, ast_map);
-            @TypedAnnotation {
+            let analysis = phase_3_run_analysis_passes(sess, &krate, ast_map, id);
+            let annotation = TypedAnnotation {
                 analysis: analysis
-            } as @pprust::PpAnn
+            };
+            pprust::print_crate(annotation.analysis.ty_cx.sess.codemap(),
+                                annotation.analysis.ty_cx.sess.diagnostic(),
+                                &krate,
+                                src_name.to_string(),
+                                &mut rdr,
+                                out,
+                                &annotation,
+                                is_expanded)
         }
-        _ => @pprust::NoAnn as @pprust::PpAnn,
-    };
+        PpmFlowGraph(nodeid) => {
+            let ast_map = ast_map.expect("--pretty flowgraph missing ast_map");
+            let node = ast_map.find(nodeid).unwrap_or_else(|| {
+                sess.fatal(format!("--pretty flowgraph couldn't find id: {}",
+                                   nodeid).as_slice())
+            });
+            let block = match node {
+                syntax::ast_map::NodeBlock(block) => block,
+                _ => {
+                    let message = format!("--pretty=flowgraph needs block, got {:?}",
+                                          node);
 
-    let src = sess.codemap.get_filemap(source_name(input)).src;
-    let mut rdr = MemReader::new(src.as_bytes().to_owned());
-    let stdout = io::stdout();
-    pprust::print_crate(sess.codemap,
-                        token::get_ident_interner(),
-                        sess.span_diagnostic,
-                        &crate,
-                        source_name(input),
-                        &mut rdr,
-                        ~stdout as ~io::Writer,
-                        annotation,
-                        is_expanded);
+                    // point to what was found, if there's an
+                    // accessible span.
+                    match ast_map.opt_span(nodeid) {
+                        Some(sp) => sess.span_fatal(sp, message.as_slice()),
+                        None => sess.fatal(message.as_slice())
+                    }
+                }
+            };
+            let analysis = phase_3_run_analysis_passes(sess, &krate,
+                                                       ast_map, id);
+            print_flowgraph(analysis, block, out)
+        }
+        _ => {
+            pprust::print_crate(sess.codemap(),
+                                sess.diagnostic(),
+                                &krate,
+                                src_name.to_string(),
+                                &mut rdr,
+                                out,
+                                &pprust::NoAnn,
+                                is_expanded)
+        }
+    }.unwrap()
+
 }
 
-pub fn get_os(triple: &str) -> Option<abi::Os> {
-    for &(name, os) in os_names.iter() {
-        if triple.contains(name) { return Some(os) }
-    }
-    None
-}
-static os_names : &'static [(&'static str, abi::Os)] = &'static [
-    ("mingw32", abi::OsWin32),
-    ("win32",   abi::OsWin32),
-    ("darwin",  abi::OsMacos),
-    ("android", abi::OsAndroid),
-    ("linux",   abi::OsLinux),
-    ("freebsd", abi::OsFreebsd)];
+fn print_flowgraph<W:io::Writer>(analysis: CrateAnalysis,
+                                 block: ast::P<ast::Block>,
+                                 mut out: W) -> io::IoResult<()> {
+    let ty_cx = &analysis.ty_cx;
+    let cfg = cfg::CFG::new(ty_cx, &*block);
+    let lcfg = LabelledCFG { ast_map: &ty_cx.map,
+                             cfg: &cfg,
+                             name: format!("block{}", block.id), };
+    debug!("cfg: {:?}", cfg);
+    let r = dot::render(&lcfg, &mut out);
+    return expand_err_details(r);
 
-pub fn get_arch(triple: &str) -> Option<abi::Architecture> {
-    for &(arch, abi) in architecture_abis.iter() {
-        if triple.contains(arch) { return Some(abi) }
-    }
-    None
-}
-static architecture_abis : &'static [(&'static str, abi::Architecture)] = &'static [
-    ("i386",   abi::X86),
-    ("i486",   abi::X86),
-    ("i586",   abi::X86),
-    ("i686",   abi::X86),
-    ("i786",   abi::X86),
-
-    ("x86_64", abi::X86_64),
-
-    ("arm",    abi::Arm),
-    ("xscale", abi::Arm),
-    ("thumb",  abi::Arm),
-
-    ("mips",   abi::Mips)];
-
-pub fn build_target_config(sopts: @session::Options,
-                           demitter: @diagnostic::Emitter)
-                           -> @session::Config {
-    let os = match get_os(sopts.target_triple) {
-      Some(os) => os,
-      None => early_error(demitter, "unknown operating system")
-    };
-    let arch = match get_arch(sopts.target_triple) {
-      Some(arch) => arch,
-      None => early_error(demitter,
-                          "unknown architecture: " + sopts.target_triple)
-    };
-    let (int_type, uint_type) = match arch {
-      abi::X86 => (ast::TyI32, ast::TyU32),
-      abi::X86_64 => (ast::TyI64, ast::TyU64),
-      abi::Arm => (ast::TyI32, ast::TyU32),
-      abi::Mips => (ast::TyI32, ast::TyU32)
-    };
-    let target_triple = sopts.target_triple.clone();
-    let target_strs = match arch {
-      abi::X86 => x86::get_target_strs(target_triple, os),
-      abi::X86_64 => x86_64::get_target_strs(target_triple, os),
-      abi::Arm => arm::get_target_strs(target_triple, os),
-      abi::Mips => mips::get_target_strs(target_triple, os)
-    };
-    let target_cfg = @session::Config {
-        os: os,
-        arch: arch,
-        target_strs: target_strs,
-        int_type: int_type,
-        uint_type: uint_type,
-    };
-    return target_cfg;
-}
-
-pub fn host_triple() -> ~str {
-    // Get the host triple out of the build environment. This ensures that our
-    // idea of the host triple is the same as for the set of libraries we've
-    // actually built.  We can't just take LLVM's host triple because they
-    // normalize all ix86 architectures to i386.
-    //
-    // Instead of grabbing the host triple (for the current host), we grab (at
-    // compile time) the target triple that this rustc is built with and
-    // calling that (at runtime) the host triple.
-    (env!("CFG_COMPILER")).to_owned()
-}
-
-pub fn build_session_options(binary: ~str,
-                             matches: &getopts::Matches,
-                             demitter: @diagnostic::Emitter)
-                             -> @session::Options {
-    let mut outputs = ~[];
-    if matches.opt_present("lib") {
-        outputs.push(session::default_lib_output());
-    }
-    if matches.opt_present("rlib") {
-        outputs.push(session::OutputRlib)
-    }
-    if matches.opt_present("staticlib") {
-        outputs.push(session::OutputStaticlib)
-    }
-    if matches.opt_present("dylib") {
-        outputs.push(session::OutputDylib)
-    }
-    if matches.opt_present("bin") {
-        outputs.push(session::OutputExecutable)
-    }
-
-    let parse_only = matches.opt_present("parse-only");
-    let no_trans = matches.opt_present("no-trans");
-    let no_analysis = matches.opt_present("no-analysis");
-    let no_rpath = matches.opt_present("no-rpath");
-
-    let lint_levels = [lint::allow, lint::warn,
-                       lint::deny, lint::forbid];
-    let mut lint_opts = ~[];
-    let lint_dict = lint::get_lint_dict();
-    for level in lint_levels.iter() {
-        let level_name = lint::level_to_str(*level);
-
-        let level_short = level_name.slice_chars(0, 1);
-        let level_short = level_short.to_ascii().to_upper().into_str();
-        let flags = vec::append(matches.opt_strs(level_short),
-                                matches.opt_strs(level_name));
-        for lint_name in flags.iter() {
-            let lint_name = lint_name.replace("-", "_");
-            match lint_dict.find_equiv(&lint_name) {
-              None => {
-                early_error(demitter, format!("unknown {} flag: {}",
-                                           level_name, lint_name));
-              }
-              Some(lint) => {
-                lint_opts.push((lint.lint, *level));
-              }
+    fn expand_err_details(r: io::IoResult<()>) -> io::IoResult<()> {
+        r.map_err(|ioerr| {
+            let orig_detail = ioerr.detail.clone();
+            let m = "graphviz::render failed";
+            io::IoError {
+                detail: Some(match orig_detail {
+                    None => m.into_string(),
+                    Some(d) => format!("{}: {}", m, d)
+                }),
+                ..ioerr
             }
-        }
+        })
     }
-
-    let mut debugging_opts = 0;
-    let debug_flags = matches.opt_strs("Z");
-    let debug_map = session::debugging_opts_map();
-    for debug_flag in debug_flags.iter() {
-        let mut this_bit = 0;
-        for tuple in debug_map.iter() {
-            let (name, bit) = match *tuple { (ref a, _, b) => (a, b) };
-            if *name == *debug_flag { this_bit = bit; break; }
-        }
-        if this_bit == 0 {
-            early_error(demitter, format!("unknown debug flag: {}", *debug_flag))
-        }
-        debugging_opts |= this_bit;
-    }
-
-    if debugging_opts & session::DEBUG_LLVM != 0 {
-        unsafe { llvm::LLVMSetDebug(1); }
-    }
-
-    let output_type =
-        if parse_only || no_trans {
-            link::OutputTypeNone
-        } else if matches.opt_present("S") &&
-                  matches.opt_present("emit-llvm") {
-            link::OutputTypeLlvmAssembly
-        } else if matches.opt_present("S") {
-            link::OutputTypeAssembly
-        } else if matches.opt_present("c") {
-            link::OutputTypeObject
-        } else if matches.opt_present("emit-llvm") {
-            link::OutputTypeBitcode
-        } else { link::OutputTypeExe };
-    let sysroot_opt = matches.opt_str("sysroot").map(|m| @Path::new(m));
-    let target = matches.opt_str("target").unwrap_or(host_triple());
-    let target_cpu = matches.opt_str("target-cpu").unwrap_or(~"generic");
-    let target_feature = matches.opt_str("target-feature").unwrap_or(~"");
-    let save_temps = matches.opt_present("save-temps");
-    let opt_level = {
-        if (debugging_opts & session::NO_OPT) != 0 {
-            No
-        } else if matches.opt_present("O") {
-            if matches.opt_present("opt-level") {
-                early_error(demitter, "-O and --opt-level both provided");
-            }
-            Default
-        } else if matches.opt_present("opt-level") {
-            match matches.opt_str("opt-level").unwrap() {
-              ~"0" => No,
-              ~"1" => Less,
-              ~"2" => Default,
-              ~"3" => Aggressive,
-              _ => {
-                early_error(demitter, "optimization level needs to be between 0-3")
-              }
-            }
-        } else { No }
-    };
-    let gc = debugging_opts & session::GC != 0;
-    let extra_debuginfo = debugging_opts & session::EXTRA_DEBUG_INFO != 0;
-    let debuginfo = debugging_opts & session::DEBUG_INFO != 0 ||
-        extra_debuginfo;
-
-    let addl_lib_search_paths = matches.opt_strs("L").map(|s| {
-        Path::new(s.as_slice())
-    }).move_iter().collect();
-    let ar = matches.opt_str("ar");
-    let linker = matches.opt_str("linker");
-    let linker_args = matches.opt_strs("link-args").flat_map( |a| {
-        a.split(' ').filter_map(|arg| {
-            if arg.is_empty() {
-                None
-            } else {
-                Some(arg.to_owned())
-            }
-        }).collect()
-    });
-
-    let cfg = parse_cfgspecs(matches.opt_strs("cfg"), demitter);
-    let test = matches.opt_present("test");
-    let android_cross_path = matches.opt_str("android-cross-path");
-    let write_dependency_info = (matches.opt_present("dep-info"),
-                                 matches.opt_str("dep-info").map(|p| Path::new(p)));
-
-    let custom_passes = match matches.opt_str("passes") {
-        None => ~[],
-        Some(s) => {
-            s.split(|c: char| c == ' ' || c == ',').map(|s| {
-                s.trim().to_owned()
-            }).collect()
-        }
-    };
-    let llvm_args = match matches.opt_str("llvm-args") {
-        None => ~[],
-        Some(s) => {
-            s.split(|c: char| c == ' ' || c == ',').map(|s| {
-                s.trim().to_owned()
-            }).collect()
-        }
-    };
-    let print_metas = (matches.opt_present("crate-id"),
-                       matches.opt_present("crate-name"),
-                       matches.opt_present("crate-file-name"));
-
-    let sopts = @session::Options {
-        outputs: outputs,
-        gc: gc,
-        optimize: opt_level,
-        custom_passes: custom_passes,
-        llvm_args: llvm_args,
-        debuginfo: debuginfo,
-        extra_debuginfo: extra_debuginfo,
-        lint_opts: lint_opts,
-        save_temps: save_temps,
-        output_type: output_type,
-        addl_lib_search_paths: @RefCell::new(addl_lib_search_paths),
-        ar: ar,
-        linker: linker,
-        linker_args: linker_args,
-        maybe_sysroot: sysroot_opt,
-        target_triple: target,
-        target_cpu: target_cpu,
-        target_feature: target_feature,
-        cfg: cfg,
-        binary: binary,
-        test: test,
-        parse_only: parse_only,
-        no_trans: no_trans,
-        no_analysis: no_analysis,
-        no_rpath: no_rpath,
-        debugging_opts: debugging_opts,
-        android_cross_path: android_cross_path,
-        write_dependency_info: write_dependency_info,
-        print_metas: print_metas,
-    };
-    return sopts;
 }
 
-pub fn build_session(sopts: @session::Options,
-                     local_crate_source_file: Option<Path>,
-                     demitter: @diagnostic::Emitter)
-                     -> Session {
-    let codemap = @codemap::CodeMap::new();
-    let diagnostic_handler =
-        diagnostic::mk_handler(Some(demitter));
-    let span_diagnostic_handler =
-        diagnostic::mk_span_handler(diagnostic_handler, codemap);
-
-    build_session_(sopts, local_crate_source_file, codemap, demitter, span_diagnostic_handler)
-}
-
-pub fn build_session_(sopts: @session::Options,
-                      local_crate_source_file: Option<Path>,
-                      codemap: @codemap::CodeMap,
-                      demitter: @diagnostic::Emitter,
-                      span_diagnostic_handler: @diagnostic::SpanHandler)
-                      -> Session {
-    let target_cfg = build_target_config(sopts, demitter);
-    let p_s = parse::new_parse_sess_special_handler(span_diagnostic_handler, codemap);
-    let cstore = @CStore::new(token::get_ident_interner());
-    let filesearch = @filesearch::FileSearch::new(
-        &sopts.maybe_sysroot,
-        sopts.target_triple,
-        sopts.addl_lib_search_paths);
-
-    // Make the path absolute, if necessary
-    let local_crate_source_file = local_crate_source_file.map(|path|
-        if path.is_absolute() {
-            path.clone()
+pub fn collect_crate_types(session: &Session,
+                           attrs: &[ast::Attribute]) -> Vec<config::CrateType> {
+    // Unconditionally collect crate types from attributes to make them used
+    let attr_types: Vec<config::CrateType> = attrs.iter().filter_map(|a| {
+        if a.check_name("crate_type") {
+            match a.value_str() {
+                Some(ref n) if n.equiv(&("rlib")) => {
+                    Some(config::CrateTypeRlib)
+                }
+                Some(ref n) if n.equiv(&("dylib")) => {
+                    Some(config::CrateTypeDylib)
+                }
+                Some(ref n) if n.equiv(&("lib")) => {
+                    Some(config::default_lib_output())
+                }
+                Some(ref n) if n.equiv(&("staticlib")) => {
+                    Some(config::CrateTypeStaticlib)
+                }
+                Some(ref n) if n.equiv(&("bin")) => Some(config::CrateTypeExecutable),
+                Some(_) => {
+                    session.add_lint(lint::builtin::UNKNOWN_CRATE_TYPE,
+                                     ast::CRATE_NODE_ID,
+                                     a.span,
+                                     "invalid `crate_type` \
+                                      value".to_string());
+                    None
+                }
+                _ => {
+                    session.add_lint(lint::builtin::UNKNOWN_CRATE_TYPE,
+                                     ast::CRATE_NODE_ID,
+                                     a.span,
+                                     "`crate_type` requires a \
+                                      value".to_string());
+                    None
+                }
+            }
         } else {
-            os::getcwd().join(path.clone())
+            None
         }
-    );
+    }).collect();
 
-    @Session_ {
-        targ_cfg: target_cfg,
-        opts: sopts,
-        cstore: cstore,
-        parse_sess: p_s,
-        codemap: codemap,
-        // For a library crate, this is always none
-        entry_fn: RefCell::new(None),
-        entry_type: Cell::new(None),
-        macro_registrar_fn: RefCell::new(None),
-        span_diagnostic: span_diagnostic_handler,
-        filesearch: filesearch,
-        building_library: Cell::new(false),
-        local_crate_source_file: local_crate_source_file,
-        working_dir: os::getcwd(),
-        lints: RefCell::new(HashMap::new()),
-        node_id: Cell::new(1),
-        outputs: @RefCell::new(~[]),
+    // If we're generating a test executable, then ignore all other output
+    // styles at all other locations
+    if session.opts.test {
+        return vec!(config::CrateTypeExecutable)
     }
+
+    // Only check command line flags if present. If no types are specified by
+    // command line, then reuse the empty `base` Vec to hold the types that
+    // will be found in crate attributes.
+    let mut base = session.opts.crate_types.clone();
+    if base.len() == 0 {
+        base.extend(attr_types.move_iter());
+        if base.len() == 0 {
+            base.push(link::default_output_for_target(session));
+        }
+        base.as_mut_slice().sort();
+        base.dedup();
+    }
+
+    base.move_iter().filter(|crate_type| {
+        let res = !link::invalid_output_for_target(session, *crate_type);
+
+        if !res {
+            session.warn(format!("dropping unsupported crate type `{}` \
+                                   for target os `{}`",
+                                 *crate_type, session.targ_cfg.os).as_slice());
+        }
+
+        res
+    }).collect()
 }
 
-pub fn parse_pretty(sess: Session, name: &str) -> PpMode {
-    match name {
-      &"normal" => PpmNormal,
-      &"expanded" => PpmExpanded,
-      &"typed" => PpmTyped,
-      &"expanded,identified" => PpmExpandedIdentified,
-      &"identified" => PpmIdentified,
-      _ => {
-        sess.fatal("argument to `pretty` must be one of `normal`, \
-                    `expanded`, `typed`, `identified`, \
-                    or `expanded,identified`");
-      }
-    }
-}
-
-// rustc command line options
-pub fn optgroups() -> ~[getopts::groups::OptGroup] {
- ~[
-  optflag("c", "",    "Compile and assemble, but do not link"),
-  optmulti("", "cfg", "Configure the compilation
-                          environment", "SPEC"),
-  optflag("",  "emit-llvm",
-                        "Produce an LLVM assembly file if used with -S option;
-                         produce an LLVM bitcode file otherwise"),
-  optflag("h", "help","Display this message"),
-  optmulti("L", "",   "Add a directory to the library search path",
-                              "PATH"),
-  optflag("",  "bin", "Compile an executable crate (default)"),
-  optflag("",  "lib", "Compile a rust library crate using the compiler's default"),
-  optflag("",  "rlib", "Compile a rust library crate as an rlib file"),
-  optflag("",  "staticlib", "Compile a static library crate"),
-  optflag("",  "dylib", "Compile a dynamic library crate"),
-  optopt("", "linker", "Program to use for linking instead of the default.", "LINKER"),
-  optopt("", "ar", "Program to use for managing archives instead of the default.", "AR"),
-  optflag("", "crate-id", "Output the crate id and exit"),
-  optflag("", "crate-name", "Output the crate name and exit"),
-  optflag("", "crate-file-name", "Output the file(s) that would be written if compilation \
-          continued and exit"),
-  optmulti("",  "link-args", "FLAGS is a space-separated list of flags
-                            passed to the linker", "FLAGS"),
-  optflag("",  "ls",  "List the symbols defined by a library crate"),
-  optflag("", "no-trans",
-                        "Run all passes except translation; no output"),
-  optflag("", "no-analysis",
-                        "Parse and expand the output, but run no analysis or produce \
-                        output"),
-  optflag("O", "",    "Equivalent to --opt-level=2"),
-  optopt("o", "",     "Write output to <filename>", "FILENAME"),
-  optopt("", "opt-level",
-                        "Optimize with possible levels 0-3", "LEVEL"),
-  optopt("", "passes", "Comma or space separated list of pass names to use. \
-                        Appends to the default list of passes to run for the \
-                        specified current optimization level. A value of \
-                        \"list\" will list all of the available passes", "NAMES"),
-  optopt("", "llvm-args", "A list of arguments to pass to llvm, comma \
-                           separated", "ARGS"),
-  optflag("", "no-rpath", "Disables setting the rpath in libs/exes"),
-  optopt( "",  "out-dir",
-                        "Write output to compiler-chosen filename
-                          in <dir>", "DIR"),
-  optflag("", "parse-only",
-                        "Parse only; do not compile, assemble, or link"),
-  optflagopt("", "pretty",
-                        "Pretty-print the input instead of compiling;
-                          valid types are: normal (un-annotated source),
-                          expanded (crates expanded),
-                          typed (crates expanded, with type annotations),
-                          or identified (fully parenthesized,
-                          AST nodes and blocks with IDs)", "TYPE"),
-  optflag("S", "",    "Compile only; do not assemble or link"),
-  optflagopt("", "dep-info",
-                        "Output dependency info to <filename> after compiling", "FILENAME"),
-  optflag("", "save-temps",
-                        "Write intermediate files (.bc, .opt.bc, .o)
-                          in addition to normal output"),
-  optopt("", "sysroot",
-                        "Override the system root", "PATH"),
-  optflag("", "test", "Build a test harness"),
-  optopt("", "target",
-                        "Target triple cpu-manufacturer-kernel[-os]
-                          to compile for (see chapter 3.4 of http://www.sourceware.org/autobook/
-                          for details)", "TRIPLE"),
-  optopt("", "target-cpu",
-                        "Select target processor (llc -mcpu=help
-                          for details)", "CPU"),
-  optopt("", "target-feature",
-                        "Target specific attributes (llc -mattr=help
-                          for details)", "FEATURE"),
-  optopt("", "android-cross-path",
-         "The path to the Android NDK", "PATH"),
-  optmulti("W", "warn",
-                        "Set lint warnings", "OPT"),
-  optmulti("A", "allow",
-                        "Set lint allowed", "OPT"),
-  optmulti("D", "deny",
-                        "Set lint denied", "OPT"),
-  optmulti("F", "forbid",
-                        "Set lint forbidden", "OPT"),
-  optmulti("Z", "",   "Set internal debugging options", "FLAG"),
-  optflag( "v", "version",
-                        "Print version info and exit"),
- ]
+pub fn collect_crate_metadata(session: &Session,
+                              _attrs: &[ast::Attribute]) -> Vec<String> {
+    session.opts.cg.metadata.clone()
 }
 
 pub struct OutputFilenames {
-    out_filename: Path,
-    obj_filename: Path
+    pub out_directory: Path,
+    pub out_filestem: String,
+    pub single_output_file: Option<Path>,
+}
+
+impl OutputFilenames {
+    pub fn path(&self, flavor: link::OutputType) -> Path {
+        match self.single_output_file {
+            Some(ref path) => return path.clone(),
+            None => {}
+        }
+        self.temp_path(flavor)
+    }
+
+    pub fn temp_path(&self, flavor: link::OutputType) -> Path {
+        let base = self.out_directory.join(self.out_filestem.as_slice());
+        match flavor {
+            link::OutputTypeBitcode => base.with_extension("bc"),
+            link::OutputTypeAssembly => base.with_extension("s"),
+            link::OutputTypeLlvmAssembly => base.with_extension("ll"),
+            link::OutputTypeObject => base.with_extension("o"),
+            link::OutputTypeExe => base,
+        }
+    }
+
+    pub fn with_extension(&self, extension: &str) -> Path {
+        let stem = self.out_filestem.as_slice();
+        self.out_directory.join(stem).with_extension(extension)
+    }
 }
 
 pub fn build_output_filenames(input: &Input,
                               odir: &Option<Path>,
                               ofile: &Option<Path>,
                               attrs: &[ast::Attribute],
-                              sess: Session)
-                           -> ~OutputFilenames {
-    let obj_path;
-    let out_path;
-    let sopts = sess.opts;
-    let stop_after_codegen = sopts.output_type != link::OutputTypeExe;
-
-    let obj_suffix = match sopts.output_type {
-        link::OutputTypeNone => ~"none",
-        link::OutputTypeBitcode => ~"bc",
-        link::OutputTypeAssembly => ~"s",
-        link::OutputTypeLlvmAssembly => ~"ll",
-        // Object and exe output both use the '.o' extension here
-        link::OutputTypeObject | link::OutputTypeExe => ~"o"
-    };
-
+                              sess: &Session)
+                           -> OutputFilenames {
     match *ofile {
-      None => {
-          // "-" as input file will cause the parser to read from stdin so we
-          // have to make up a name
-          // We want to toss everything after the final '.'
-          let dirpath = match *odir {
-              Some(ref d) => (*d).clone(),
-              None => match *input {
-                  StrInput(_) => os::getcwd(),
-                  FileInput(ref ifile) => (*ifile).dir_path()
-              }
-          };
+        None => {
+            // "-" as input file will cause the parser to read from stdin so we
+            // have to make up a name
+            // We want to toss everything after the final '.'
+            let dirpath = match *odir {
+                Some(ref d) => d.clone(),
+                None => Path::new(".")
+            };
 
-          let mut stem = match *input {
-              // FIXME (#9639): This needs to handle non-utf8 paths
-              FileInput(ref ifile) => (*ifile).filestem_str().unwrap().to_managed(),
-              StrInput(_) => @"rust_out"
-          };
+            // If a crate name is present, we use it as the link name
+            let stem = sess.opts.crate_name.clone().or_else(|| {
+                attr::find_crate_name(attrs).map(|n| n.get().to_string())
+            }).or_else(|| {
+                // NB: this clause can be removed once #[crate_id] is no longer
+                // deprecated.
+                //
+                // Also note that this will be warned about later so we don't
+                // warn about it here.
+                use syntax::crateid::CrateId;
+                attrs.iter().find(|at| at.check_name("crate_id"))
+                     .and_then(|at| at.value_str())
+                     .and_then(|s| from_str::<CrateId>(s.get()))
+                     .map(|id| id.name)
+            }).unwrap_or(input.filestem());
 
-          // If a crateid is present, we use it as the link name
-          let crateid = attr::find_crateid(attrs);
-          match crateid {
-              None => {}
-              Some(crateid) => {
-                  stem = crateid.name.to_managed()
-              }
-          }
-
-          if sess.building_library.get() {
-              out_path = dirpath.join(os::dll_filename(stem));
-              obj_path = {
-                  let mut p = dirpath.join(stem);
-                  p.set_extension(obj_suffix);
-                  p
-              };
-          } else {
-              out_path = dirpath.join(stem);
-              obj_path = out_path.with_extension(obj_suffix);
-          }
-      }
-
-      Some(ref out_file) => {
-        out_path = out_file.clone();
-        obj_path = if stop_after_codegen {
-            out_file.clone()
-        } else {
-            out_file.with_extension(obj_suffix)
-        };
-
-        if sess.building_library.get() {
-            sess.warn("ignoring specified output filename for library.");
+            OutputFilenames {
+                out_directory: dirpath,
+                out_filestem: stem,
+                single_output_file: None,
+            }
         }
 
-        if *odir != None {
-            sess.warn("ignoring --out-dir flag due to -o flag.");
+        Some(ref out_file) => {
+            let ofile = if sess.opts.output_types.len() > 1 {
+                sess.warn("ignoring specified output filename because multiple \
+                           outputs were requested");
+                None
+            } else {
+                Some(out_file.clone())
+            };
+            if *odir != None {
+                sess.warn("ignoring --out-dir flag due to -o flag.");
+            }
+            OutputFilenames {
+                out_directory: out_file.dir_path(),
+                out_filestem: out_file.filestem_str().unwrap().to_string(),
+                single_output_file: ofile,
+            }
         }
-      }
-    }
-
-    ~OutputFilenames {
-        out_filename: out_path,
-        obj_filename: obj_path
-    }
-}
-
-pub fn early_error(emitter: &diagnostic::Emitter, msg: &str) -> ! {
-    emitter.emit(None, msg, diagnostic::Fatal);
-    fail!(diagnostic::FatalError);
-}
-
-pub fn list_metadata(sess: Session, path: &Path, out: &mut io::Writer) {
-    metadata::loader::list_file_metadata(
-        token::get_ident_interner(),
-        session::sess_os_to_meta_os(sess.targ_cfg.os), path, out);
-}
-
-#[cfg(test)]
-mod test {
-
-    use driver::driver::{build_configuration, build_session};
-    use driver::driver::{build_session_options, optgroups};
-
-    use extra::getopts::groups::getopts;
-    use syntax::attr;
-    use syntax::attr::AttrMetaMethods;
-    use syntax::diagnostic;
-
-    // When the user supplies --test we should implicitly supply --cfg test
-    #[test]
-    fn test_switch_implies_cfg_test() {
-        let matches =
-            &match getopts([~"--test"], optgroups()) {
-              Ok(m) => m,
-              Err(f) => fail!("test_switch_implies_cfg_test: {}", f.to_err_msg())
-            };
-        let sessopts = build_session_options(~"rustc", matches, @diagnostic::DefaultEmitter);
-        let sess = build_session(sessopts, None, @diagnostic::DefaultEmitter);
-        let cfg = build_configuration(sess);
-        assert!((attr::contains_name(cfg, "test")));
-    }
-
-    // When the user supplies --test and --cfg test, don't implicitly add
-    // another --cfg test
-    #[test]
-    fn test_switch_implies_cfg_test_unless_cfg_test() {
-        let matches =
-            &match getopts([~"--test", ~"--cfg=test"], optgroups()) {
-              Ok(m) => m,
-              Err(f) => {
-                fail!("test_switch_implies_cfg_test_unless_cfg_test: {}",
-                       f.to_err_msg());
-              }
-            };
-        let sessopts = build_session_options(~"rustc", matches, @diagnostic::DefaultEmitter);
-        let sess = build_session(sessopts, None, @diagnostic::DefaultEmitter);
-        let cfg = build_configuration(sess);
-        let mut test_items = cfg.iter().filter(|m| "test" == m.name());
-        assert!(test_items.next().is_some());
-        assert!(test_items.next().is_none());
     }
 }

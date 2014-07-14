@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
+extern crate debug;
 
 pub fn main() {
     let i: int = if false { fail!() } else { 5 };
-    info!("{:?}", i);
+    println!("{:?}", i);
 }

@@ -1,18 +1,47 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
+// The Computer Language Benchmarks Game
+// http://benchmarksgame.alioth.debian.org/
 //
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+// contributed by the Rust Project Developers
 
-extern mod extra;
-extern mod arena;
+// Copyright (c) 2012-2014 The Rust Project Developers
+//
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+//
+// - Redistributions of source code must retain the above copyright
+//   notice, this list of conditions and the following disclaimer.
+//
+// - Redistributions in binary form must reproduce the above copyright
+//   notice, this list of conditions and the following disclaimer in
+//   the documentation and/or other materials provided with the
+//   distribution.
+//
+// - Neither the name of "The Computer Language Benchmarks Game" nor
+//   the name of "The Computer Language Shootout Benchmarks" nor the
+//   names of its contributors may be used to endorse or promote
+//   products derived from this software without specific prior
+//   written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+// FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+// COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+// OF THE POSSIBILITY OF SUCH DAMAGE.
+
+extern crate arena;
 
 use std::iter::range_step;
-use extra::future::Future;
+use std::sync::Future;
 use arena::TypedArena;
 
 enum Tree<'a> {
@@ -40,12 +69,13 @@ fn bottom_up_tree<'r>(arena: &'r TypedArena<Tree<'r>>, item: int, depth: int)
 
 fn main() {
     let args = std::os::args();
+    let args = args.as_slice();
     let n = if std::os::getenv("RUST_BENCH").is_some() {
         17
     } else if args.len() <= 1u {
         8
     } else {
-        from_str(args[1]).unwrap()
+        from_str(args[1].as_slice()).unwrap()
     };
     let min_depth = 4;
     let max_depth = if min_depth + 2 > n {min_depth + 2} else {n};
@@ -64,7 +94,7 @@ fn main() {
 
     let mut messages = range_step(min_depth, max_depth + 1, 2).map(|depth| {
             use std::num::pow;
-            let iterations = pow(2, (max_depth - depth + min_depth) as uint);
+            let iterations = pow(2i, (max_depth - depth + min_depth) as uint);
             Future::spawn(proc() {
                 let mut chk = 0;
                 for i in range(1, iterations + 1) {
@@ -76,7 +106,7 @@ fn main() {
                 format!("{}\t trees of depth {}\t check: {}",
                         iterations * 2, depth, chk)
             })
-        }).to_owned_vec();
+        }).collect::<Vec<Future<String>>>();
 
     for message in messages.mut_iter() {
         println!("{}", *message.get_ref());

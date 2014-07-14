@@ -8,21 +8,24 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-fast doesn't like extern crate
 
-use std::cast::transmute;
-use std::libc::c_void;
+extern crate libc;
 
-struct NonCopyable(*c_void);
+use std::mem::transmute;
+use libc::c_void;
+
+struct NonCopyable(*const c_void);
 
 impl Drop for NonCopyable {
     fn drop(&mut self) {
         let NonCopyable(p) = *self;
-        let _v = unsafe { transmute::<*c_void, ~int>(p) };
+        let _v = unsafe { transmute::<*const c_void, Box<int>>(p) };
     }
 }
 
 pub fn main() {
-    let t = ~0;
-    let p = unsafe { transmute::<~int, *c_void>(t) };
+    let t = box 0;
+    let p = unsafe { transmute::<Box<int>, *const c_void>(t) };
     let _z = NonCopyable(p);
 }

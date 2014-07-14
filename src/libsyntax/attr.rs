@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -11,62 +11,79 @@
 // Functions dealing with attributes and meta items
 
 use ast;
-use ast::{Attribute, Attribute_, MetaItem, MetaWord, MetaNameValue, MetaList};
+use ast::{AttrId, Attribute, Attribute_, MetaItem, MetaWord, MetaNameValue, MetaList};
 use codemap::{Span, Spanned, spanned, dummy_spanned};
 use codemap::BytePos;
 use diagnostic::SpanHandler;
-use parse::comments::{doc_comment_style, strip_doc_comment_decoration};
-use crateid::CrateId;
+use parse::lexer::comments::{doc_comment_style, strip_doc_comment_decoration};
+use parse::token::InternedString;
+use parse::token;
 
-use std::hashmap::HashSet;
+use std::collections::HashSet;
+use std::collections::BitvSet;
+use std::gc::{Gc, GC};
+
+local_data_key!(used_attrs: BitvSet)
+
+pub fn mark_used(attr: &Attribute) {
+    let mut used = used_attrs.replace(None).unwrap_or_else(|| BitvSet::new());
+    let AttrId(id) = attr.node.id;
+    used.insert(id);
+    used_attrs.replace(Some(used));
+}
+
+pub fn is_used(attr: &Attribute) -> bool {
+    let AttrId(id) = attr.node.id;
+    used_attrs.get().map_or(false, |used| used.contains(&id))
+}
 
 pub trait AttrMetaMethods {
-    // This could be changed to `fn check_name(&self, name: @str) ->
-    // bool` which would facilitate a side table recording which
-    // attributes/meta items are used/unused.
+    fn check_name(&self, name: &str) -> bool {
+        name == self.name().get()
+    }
 
     /// Retrieve the name of the meta item, e.g. foo in #[foo],
     /// #[foo="bar"] and #[foo(bar)]
-    fn name(&self) -> @str;
+    fn name(&self) -> InternedString;
 
-    /**
-     * Gets the string value if self is a MetaNameValue variant
-     * containing a string, otherwise None.
-     */
-    fn value_str(&self) -> Option<@str>;
+    /// Gets the string value if self is a MetaNameValue variant
+    /// containing a string, otherwise None.
+    fn value_str(&self) -> Option<InternedString>;
     /// Gets a list of inner meta items from a list MetaItem type.
-    fn meta_item_list<'a>(&'a self) -> Option<&'a [@MetaItem]>;
-
-    /**
-     * If the meta item is a name-value type with a string value then returns
-     * a tuple containing the name and string value, otherwise `None`
-     */
-    fn name_str_pair(&self) -> Option<(@str, @str)>;
+    fn meta_item_list<'a>(&'a self) -> Option<&'a [Gc<MetaItem>]>;
 }
 
 impl AttrMetaMethods for Attribute {
-    fn name(&self) -> @str { self.meta().name() }
-    fn value_str(&self) -> Option<@str> { self.meta().value_str() }
-    fn meta_item_list<'a>(&'a self) -> Option<&'a [@MetaItem]> {
+    fn check_name(&self, name: &str) -> bool {
+        let matches = name == self.name().get();
+        if matches {
+            mark_used(self);
+        }
+        matches
+    }
+    fn name(&self) -> InternedString { self.meta().name() }
+    fn value_str(&self) -> Option<InternedString> {
+        self.meta().value_str()
+    }
+    fn meta_item_list<'a>(&'a self) -> Option<&'a [Gc<MetaItem>]> {
         self.node.value.meta_item_list()
     }
-    fn name_str_pair(&self) -> Option<(@str, @str)> { self.meta().name_str_pair() }
 }
 
 impl AttrMetaMethods for MetaItem {
-    fn name(&self) -> @str {
+    fn name(&self) -> InternedString {
         match self.node {
-            MetaWord(n) => n,
-            MetaNameValue(n, _) => n,
-            MetaList(n, _) => n
+            MetaWord(ref n) => (*n).clone(),
+            MetaNameValue(ref n, _) => (*n).clone(),
+            MetaList(ref n, _) => (*n).clone(),
         }
     }
 
-    fn value_str(&self) -> Option<@str> {
+    fn value_str(&self) -> Option<InternedString> {
         match self.node {
             MetaNameValue(_, ref v) => {
                 match v.node {
-                    ast::LitStr(s, _) => Some(s),
+                    ast::LitStr(ref s, _) => Some((*s).clone()),
                     _ => None,
                 }
             },
@@ -74,37 +91,32 @@ impl AttrMetaMethods for MetaItem {
         }
     }
 
-    fn meta_item_list<'a>(&'a self) -> Option<&'a [@MetaItem]> {
+    fn meta_item_list<'a>(&'a self) -> Option<&'a [Gc<MetaItem>]> {
         match self.node {
             MetaList(_, ref l) => Some(l.as_slice()),
             _ => None
         }
     }
-
-    fn name_str_pair(&self) -> Option<(@str, @str)> {
-        self.value_str().map(|s| (self.name(), s))
-    }
 }
 
 // Annoying, but required to get test_cfg to work
-impl AttrMetaMethods for @MetaItem {
-    fn name(&self) -> @str { (**self).name() }
-    fn value_str(&self) -> Option<@str> { (**self).value_str() }
-    fn meta_item_list<'a>(&'a self) -> Option<&'a [@MetaItem]> {
+impl AttrMetaMethods for Gc<MetaItem> {
+    fn name(&self) -> InternedString { (**self).name() }
+    fn value_str(&self) -> Option<InternedString> { (**self).value_str() }
+    fn meta_item_list<'a>(&'a self) -> Option<&'a [Gc<MetaItem>]> {
         (**self).meta_item_list()
     }
-    fn name_str_pair(&self) -> Option<(@str, @str)> { (**self).name_str_pair() }
 }
 
 
 pub trait AttributeMethods {
-    fn meta(&self) -> @MetaItem;
+    fn meta(&self) -> Gc<MetaItem>;
     fn desugar_doc(&self) -> Attribute;
 }
 
 impl AttributeMethods for Attribute {
     /// Extract the MetaItem from inside this Attribute.
-    fn meta(&self) -> @MetaItem {
+    fn meta(&self) -> Gc<MetaItem> {
         self.node.value
     }
 
@@ -114,9 +126,15 @@ impl AttributeMethods for Attribute {
     fn desugar_doc(&self) -> Attribute {
         if self.node.is_sugared_doc {
             let comment = self.value_str().unwrap();
-            let meta = mk_name_value_item_str(@"doc",
-                                              strip_doc_comment_decoration(comment).to_managed());
-            mk_attr(meta)
+            let meta = mk_name_value_item_str(
+                InternedString::new("doc"),
+                token::intern_and_get_ident(strip_doc_comment_decoration(
+                        comment.get()).as_slice()));
+            if self.node.style == ast::AttrOuter {
+                mk_attr_outer(self.node.id, meta)
+            } else {
+                mk_attr_inner(self.node.id, meta)
+            }
         } else {
             *self
         }
@@ -125,37 +143,64 @@ impl AttributeMethods for Attribute {
 
 /* Constructors */
 
-pub fn mk_name_value_item_str(name: @str, value: @str) -> @MetaItem {
+pub fn mk_name_value_item_str(name: InternedString, value: InternedString)
+                              -> Gc<MetaItem> {
     let value_lit = dummy_spanned(ast::LitStr(value, ast::CookedStr));
     mk_name_value_item(name, value_lit)
 }
 
-pub fn mk_name_value_item(name: @str, value: ast::Lit) -> @MetaItem {
-    @dummy_spanned(MetaNameValue(name, value))
+pub fn mk_name_value_item(name: InternedString, value: ast::Lit)
+                          -> Gc<MetaItem> {
+    box(GC) dummy_spanned(MetaNameValue(name, value))
 }
 
-pub fn mk_list_item(name: @str, items: ~[@MetaItem]) -> @MetaItem {
-    @dummy_spanned(MetaList(name, items))
+pub fn mk_list_item(name: InternedString,
+                    items: Vec<Gc<MetaItem>>) -> Gc<MetaItem> {
+    box(GC) dummy_spanned(MetaList(name, items))
 }
 
-pub fn mk_word_item(name: @str) -> @MetaItem {
-    @dummy_spanned(MetaWord(name))
+pub fn mk_word_item(name: InternedString) -> Gc<MetaItem> {
+    box(GC) dummy_spanned(MetaWord(name))
 }
 
-pub fn mk_attr(item: @MetaItem) -> Attribute {
+local_data_key!(next_attr_id: uint)
+
+pub fn mk_attr_id() -> AttrId {
+    let id = next_attr_id.replace(None).unwrap_or(0);
+    next_attr_id.replace(Some(id + 1));
+    AttrId(id)
+}
+
+/// Returns an inner attribute with the given value.
+pub fn mk_attr_inner(id: AttrId, item: Gc<MetaItem>) -> Attribute {
     dummy_spanned(Attribute_ {
+        id: id,
         style: ast::AttrInner,
         value: item,
         is_sugared_doc: false,
     })
 }
 
-pub fn mk_sugared_doc_attr(text: @str, lo: BytePos, hi: BytePos) -> Attribute {
-    let style = doc_comment_style(text);
+/// Returns an outer attribute with the given value.
+pub fn mk_attr_outer(id: AttrId, item: Gc<MetaItem>) -> Attribute {
+    dummy_spanned(Attribute_ {
+        id: id,
+        style: ast::AttrOuter,
+        value: item,
+        is_sugared_doc: false,
+    })
+}
+
+pub fn mk_sugared_doc_attr(id: AttrId, text: InternedString, lo: BytePos,
+                           hi: BytePos)
+                           -> Attribute {
+    let style = doc_comment_style(text.get());
     let lit = spanned(lo, hi, ast::LitStr(text, ast::CookedStr));
     let attr = Attribute_ {
+        id: id,
         style: style,
-        value: @spanned(lo, hi, MetaNameValue(@"doc", lit)),
+        value: box(GC) spanned(lo, hi, MetaNameValue(InternedString::new("doc"),
+                                              lit)),
         is_sugared_doc: true
     };
     spanned(lo, hi, attr)
@@ -165,8 +210,8 @@ pub fn mk_sugared_doc_attr(text: @str, lo: BytePos, hi: BytePos) -> Attribute {
 /// Check if `needle` occurs in `haystack` by a structural
 /// comparison. This is slightly subtle, and relies on ignoring the
 /// span included in the `==` comparison a plain MetaItem.
-pub fn contains(haystack: &[@ast::MetaItem],
-                needle: @ast::MetaItem) -> bool {
+pub fn contains(haystack: &[Gc<ast::MetaItem>],
+                needle: Gc<ast::MetaItem>) -> bool {
     debug!("attr::contains (name={})", needle.name());
     haystack.iter().any(|item| {
         debug!("  testing: {}", item.name());
@@ -178,39 +223,43 @@ pub fn contains_name<AM: AttrMetaMethods>(metas: &[AM], name: &str) -> bool {
     debug!("attr::contains_name (name={})", name);
     metas.iter().any(|item| {
         debug!("  testing: {}", item.name());
-        name == item.name()
+        item.check_name(name)
     })
 }
 
 pub fn first_attr_value_str_by_name(attrs: &[Attribute], name: &str)
-                                 -> Option<@str> {
+                                 -> Option<InternedString> {
     attrs.iter()
-        .find(|at| name == at.name())
+        .find(|at| at.check_name(name))
         .and_then(|at| at.value_str())
 }
 
-pub fn last_meta_item_value_str_by_name(items: &[@MetaItem], name: &str)
-                                     -> Option<@str> {
-    items.rev_iter().find(|mi| name == mi.name()).and_then(|i| i.value_str())
+pub fn last_meta_item_value_str_by_name(items: &[Gc<MetaItem>], name: &str)
+                                     -> Option<InternedString> {
+    items.iter()
+         .rev()
+         .find(|mi| mi.check_name(name))
+         .and_then(|i| i.value_str())
 }
 
 /* Higher-level applications */
 
-pub fn sort_meta_items(items: &[@MetaItem]) -> ~[@MetaItem] {
+pub fn sort_meta_items(items: &[Gc<MetaItem>]) -> Vec<Gc<MetaItem>> {
     // This is sort of stupid here, but we need to sort by
     // human-readable strings.
     let mut v = items.iter()
         .map(|&mi| (mi.name(), mi))
-        .collect::<~[(@str, @MetaItem)]>();
+        .collect::<Vec<(InternedString, Gc<MetaItem>)> >();
 
-    v.sort_by(|&(a, _), &(b, _)| a.cmp(&b));
+    v.sort_by(|&(ref a, _), &(ref b, _)| a.cmp(b));
 
     // There doesn't seem to be a more optimal way to do this
     v.move_iter().map(|(_, m)| {
         match m.node {
-            MetaList(n, ref mis) => {
-                @Spanned {
-                    node: MetaList(n, sort_meta_items(*mis)),
+            MetaList(ref n, ref mis) => {
+                box(GC) Spanned {
+                    node: MetaList((*n).clone(),
+                                   sort_meta_items(mis.as_slice())),
                     .. /*bad*/ (*m).clone()
                 }
             }
@@ -219,29 +268,11 @@ pub fn sort_meta_items(items: &[@MetaItem]) -> ~[@MetaItem] {
     }).collect()
 }
 
-/**
- * From a list of crate attributes get only the meta_items that affect crate
- * linkage
- */
-pub fn find_linkage_metas(attrs: &[Attribute]) -> ~[@MetaItem] {
-    let mut result = ~[];
-    for attr in attrs.iter().filter(|at| "link" == at.name()) {
-        match attr.meta().node {
-            MetaList(_, ref items) => result.push_all(*items),
-            _ => ()
-        }
-    }
-    result
+pub fn find_crate_name(attrs: &[Attribute]) -> Option<InternedString> {
+    first_attr_value_str_by_name(attrs, "crate_name")
 }
 
-pub fn find_crateid(attrs: &[Attribute]) -> Option<CrateId> {
-    match first_attr_value_str_by_name(attrs, "crate_id") {
-        None => None,
-        Some(id) => from_str::<CrateId>(id),
-    }
-}
-
-#[deriving(Eq)]
+#[deriving(PartialEq)]
 pub enum InlineAttr {
     InlineNone,
     InlineHint,
@@ -254,17 +285,21 @@ pub fn find_inline_attr(attrs: &[Attribute]) -> InlineAttr {
     // FIXME (#2809)---validate the usage of #[inline] and #[inline]
     attrs.iter().fold(InlineNone, |ia,attr| {
         match attr.node.value.node {
-          MetaWord(n) if "inline" == n => InlineHint,
-          MetaList(n, ref items) if "inline" == n => {
-            if contains_name(*items, "always") {
-                InlineAlways
-            } else if contains_name(*items, "never") {
-                InlineNever
-            } else {
+            MetaWord(ref n) if n.equiv(&("inline")) => {
+                mark_used(attr);
                 InlineHint
             }
-          }
-          _ => ia
+            MetaList(ref n, ref items) if n.equiv(&("inline")) => {
+                mark_used(attr);
+                if contains_name(items.as_slice(), "always") {
+                    InlineAlways
+                } else if contains_name(items.as_slice(), "never") {
+                    InlineNever
+                } else {
+                    InlineHint
+                }
+            }
+            _ => ia
         }
     })
 }
@@ -276,15 +311,15 @@ pub fn find_inline_attr(attrs: &[Attribute]) -> InlineAttr {
 /// test_cfg(`[foo="a", bar]`, `[cfg(bar, foo="a")]`) == true
 /// test_cfg(`[foo="a", bar]`, `[cfg(bar, foo="b")]`) == false
 pub fn test_cfg<AM: AttrMetaMethods, It: Iterator<AM>>
-    (cfg: &[@MetaItem], mut metas: It) -> bool {
+    (cfg: &[Gc<MetaItem>], mut metas: It) -> bool {
     // having no #[cfg(...)] attributes counts as matching.
     let mut no_cfgs = true;
 
     // this would be much nicer as a chain of iterator adaptors, but
     // this doesn't work.
-    let some_cfg_matches = metas.any(|mi| {
+    let some_cfg_matches = metas.fold(false, |matches, mi| {
         debug!("testing name: {}", mi.name());
-        if "cfg" == mi.name() { // it is a #[cfg()] attribute
+        let this_matches = if mi.check_name("cfg") { // it is a #[cfg()] attribute
             debug!("is cfg");
             no_cfgs = false;
              // only #[cfg(...)] ones are understood.
@@ -294,13 +329,14 @@ pub fn test_cfg<AM: AttrMetaMethods, It: Iterator<AM>>
                     cfg_meta.iter().all(|cfg_mi| {
                         debug!("cfg({}[...])", cfg_mi.name());
                         match cfg_mi.node {
-                            ast::MetaList(s, ref not_cfgs) if "not" == s => {
+                            ast::MetaList(ref s, ref not_cfgs)
+                            if s.equiv(&("not")) => {
                                 debug!("not!");
                                 // inside #[cfg(not(...))], so these need to all
                                 // not match.
-                                not_cfgs.iter().all(|mi| {
+                                !not_cfgs.iter().all(|mi| {
                                     debug!("cfg(not({}[...]))", mi.name());
-                                    !contains(cfg, *mi)
+                                    contains(cfg, *mi)
                                 })
                             }
                             _ => contains(cfg, *cfg_mi)
@@ -311,20 +347,22 @@ pub fn test_cfg<AM: AttrMetaMethods, It: Iterator<AM>>
             }
         } else {
             false
-        }
+        };
+        matches || this_matches
     });
     debug!("test_cfg (no_cfgs={}, some_cfg_matches={})", no_cfgs, some_cfg_matches);
     no_cfgs || some_cfg_matches
 }
 
-/// Represents the #[deprecated="foo"] (etc) attributes.
+/// Represents the #[deprecated="foo"] and friends attributes.
+#[deriving(Encodable,Decodable,Clone,Show)]
 pub struct Stability {
-    level: StabilityLevel,
-    text: Option<@str>
+    pub level: StabilityLevel,
+    pub text: Option<InternedString>
 }
 
 /// The available stability levels.
-#[deriving(Eq,Ord,Clone,ToStr)]
+#[deriving(Encodable,Decodable,PartialEq,PartialOrd,Clone,Show)]
 pub enum StabilityLevel {
     Deprecated,
     Experimental,
@@ -334,10 +372,13 @@ pub enum StabilityLevel {
     Locked
 }
 
-/// Find the first stability attribute. `None` if none exists.
-pub fn find_stability<AM: AttrMetaMethods, It: Iterator<AM>>(mut metas: It) -> Option<Stability> {
-    for m in metas {
-        let level = match m.name().as_slice() {
+pub fn find_stability_generic<'a,
+                              AM: AttrMetaMethods,
+                              I: Iterator<&'a AM>>
+                             (mut attrs: I)
+                             -> Option<(Stability, &'a AM)> {
+    for attr in attrs {
+        let level = match attr.name().get() {
             "deprecated" => Deprecated,
             "experimental" => Experimental,
             "unstable" => Unstable,
@@ -347,51 +388,59 @@ pub fn find_stability<AM: AttrMetaMethods, It: Iterator<AM>>(mut metas: It) -> O
             _ => continue // not a stability level
         };
 
-        return Some(Stability {
+        return Some((Stability {
                 level: level,
-                text: m.value_str()
-            });
+                text: attr.value_str()
+            }, attr));
     }
     None
 }
 
-pub fn require_unique_names(diagnostic: @SpanHandler, metas: &[@MetaItem]) {
+/// Find the first stability attribute. `None` if none exists.
+pub fn find_stability(attrs: &[Attribute]) -> Option<Stability> {
+    find_stability_generic(attrs.iter()).map(|(s, attr)| {
+        mark_used(attr);
+        s
+    })
+}
+
+pub fn require_unique_names(diagnostic: &SpanHandler, metas: &[Gc<MetaItem>]) {
     let mut set = HashSet::new();
     for meta in metas.iter() {
         let name = meta.name();
 
-        if !set.insert(name) {
+        if !set.insert(name.clone()) {
             diagnostic.span_fatal(meta.span,
-                                  format!("duplicate meta item `{}`", name));
+                                  format!("duplicate meta item `{}`",
+                                          name).as_slice());
         }
     }
 }
 
 
-/**
- * Fold this over attributes to parse #[repr(...)] forms.
- *
- * Valid repr contents: any of the primitive integral type names (see
- * `int_type_of_word`, below) to specify the discriminant type; and `C`, to use
- * the same discriminant size that the corresponding C enum would.  These are
- * not allowed on univariant or zero-variant enums, which have no discriminant.
- *
- * If a discriminant type is so specified, then the discriminant will be
- * present (before fields, if any) with that type; reprensentation
- * optimizations which would remove it will not be done.
- */
-pub fn find_repr_attr(diagnostic: @SpanHandler, attr: @ast::MetaItem, acc: ReprAttr)
+/// Fold this over attributes to parse #[repr(...)] forms.
+///
+/// Valid repr contents: any of the primitive integral type names (see
+/// `int_type_of_word`, below) to specify the discriminant type; and `C`, to use
+/// the same discriminant size that the corresponding C enum would.  These are
+/// not allowed on univariant or zero-variant enums, which have no discriminant.
+///
+/// If a discriminant type is so specified, then the discriminant will be
+/// present (before fields, if any) with that type; reprensentation
+/// optimizations which would remove it will not be done.
+pub fn find_repr_attr(diagnostic: &SpanHandler, attr: &Attribute, acc: ReprAttr)
     -> ReprAttr {
     let mut acc = acc;
-    match attr.node {
-        ast::MetaList(s, ref items) if "repr" == s => {
+    match attr.node.value.node {
+        ast::MetaList(ref s, ref items) if s.equiv(&("repr")) => {
+            mark_used(attr);
             for item in items.iter() {
                 match item.node {
-                    ast::MetaWord(word) => {
-                        let hint = match word.as_slice() {
+                    ast::MetaWord(ref word) => {
+                        let hint = match word.get() {
                             // Can't use "extern" because it's not a lexical identifier.
                             "C" => ReprExtern,
-                            _ => match int_type_of_word(word) {
+                            _ => match int_type_of_word(word.get()) {
                                 Some(ity) => ReprInt(item.span, ity),
                                 None => {
                                     // Not a word we recognize
@@ -418,7 +467,7 @@ pub fn find_repr_attr(diagnostic: @SpanHandler, attr: @ast::MetaItem, acc: ReprA
         // Not a "repr" hint: ignore.
         _ => { }
     }
-    return acc;
+    acc
 }
 
 fn int_type_of_word(s: &str) -> Option<IntType> {
@@ -437,7 +486,7 @@ fn int_type_of_word(s: &str) -> Option<IntType> {
     }
 }
 
-#[deriving(Eq)]
+#[deriving(PartialEq, Show)]
 pub enum ReprAttr {
     ReprAny,
     ReprInt(Span, IntType),
@@ -454,7 +503,7 @@ impl ReprAttr {
     }
 }
 
-#[deriving(Eq)]
+#[deriving(PartialEq, Show)]
 pub enum IntType {
     SignedInt(ast::IntTy),
     UnsignedInt(ast::UintTy)

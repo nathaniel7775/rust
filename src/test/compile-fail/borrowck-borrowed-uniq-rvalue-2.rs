@@ -8,6 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![feature(unsafe_destructor)]
+
+extern crate debug;
+
 struct defer<'a> {
     x: &'a [&'a str],
 }
@@ -16,7 +20,7 @@ struct defer<'a> {
 impl<'a> Drop for defer<'a> {
     fn drop(&mut self) {
         unsafe {
-            error!("{:?}", self.x);
+            println!("{:?}", self.x);
         }
     }
 }
@@ -28,6 +32,7 @@ fn defer<'r>(x: &'r [&'r str]) -> defer<'r> {
 }
 
 fn main() {
-    let x = defer(~["Goodbye", "world!"]); //~ ERROR borrowed value does not live long enough
+    let x = defer(vec!("Goodbye", "world!").as_slice());
+    //~^ ERROR borrowed value does not live long enough
     x.x[0];
 }

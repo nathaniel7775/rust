@@ -8,12 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
-struct F { f: @G }
-struct G { g: ~[int] }
+use std::gc::{GC, Gc};
+
+struct F { f: Gc<G> }
+struct G { g: Vec<int> }
 
 pub fn main() {
-    let rec = @F {f: @G {g: ~[1, 2, 3]}};
+    let rec = box(GC) F {f: box(GC) G {g: vec!(1, 2, 3)}};
     while rec.f.g.len() == 23 {}
 }

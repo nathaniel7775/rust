@@ -17,10 +17,16 @@ getaddrinfo()
 
 */
 
-use option::{Option, Some, None};
+#![allow(missing_doc)]
+
+use iter::Iterator;
+use io::{IoResult, IoError};
 use io::net::ip::{SocketAddr, IpAddr};
+use option::{Option, Some, None};
+use result::{Ok, Err};
 use rt::rtio::{IoFactory, LocalIo};
-use vec::ImmutableVector;
+use rt::rtio;
+use vec::Vec;
 
 /// Hints to the types of sockets that are desired when looking up hosts
 pub enum SocketType {
@@ -53,28 +59,24 @@ pub enum Protocol {
 /// For details on these fields, see their corresponding definitions via
 /// `man -s 3 getaddrinfo`
 pub struct Hint {
-    family: uint,
-    socktype: Option<SocketType>,
-    protocol: Option<Protocol>,
-    flags: uint,
+    pub family: uint,
+    pub socktype: Option<SocketType>,
+    pub protocol: Option<Protocol>,
+    pub flags: uint,
 }
 
 pub struct Info {
-    address: SocketAddr,
-    family: uint,
-    socktype: Option<SocketType>,
-    protocol: Option<Protocol>,
-    flags: uint,
+    pub address: SocketAddr,
+    pub family: uint,
+    pub socktype: Option<SocketType>,
+    pub protocol: Option<Protocol>,
+    pub flags: uint,
 }
 
 /// Easy name resolution. Given a hostname, returns the list of IP addresses for
 /// that hostname.
-///
-/// # Failure
-///
-/// On failure, this will raise on the `io_error` condition.
-pub fn get_host_addresses(host: &str) -> Option<~[IpAddr]> {
-    lookup(Some(host), None, None).map(|a| a.map(|i| i.address.ip))
+pub fn get_host_addresses(host: &str) -> IoResult<Vec<IpAddr>> {
+    lookup(Some(host), None, None).map(|a| a.move_iter().map(|i| i.address.ip).collect())
 }
 
 /// Full-fleged resolution. This function will perform a synchronous call to
@@ -87,25 +89,42 @@ pub fn get_host_addresses(host: &str) -> Option<~[IpAddr]> {
 /// * hint - see the hint structure, and "man -s 3 getaddrinfo", for how this
 ///          controls lookup
 ///
-/// # Failure
-///
-/// On failure, this will raise on the `io_error` condition.
-///
 /// FIXME: this is not public because the `Hint` structure is not ready for public
 ///      consumption just yet.
+#[allow(unused_variable)]
 fn lookup(hostname: Option<&str>, servname: Option<&str>, hint: Option<Hint>)
-          -> Option<~[Info]> {
-    LocalIo::maybe_raise(|io| io.get_host_addresses(hostname, servname, hint))
+          -> IoResult<Vec<Info>> {
+    let hint = hint.map(|Hint { family, socktype, protocol, flags }| {
+        rtio::AddrinfoHint {
+            family: family,
+            socktype: 0, // FIXME: this should use the above variable
+            protocol: 0, // FIXME: this should use the above variable
+            flags: flags,
+        }
+    });
+    match LocalIo::maybe_raise(|io| {
+        io.get_host_addresses(hostname, servname, hint)
+    }) {
+        Ok(v) => Ok(v.move_iter().map(|info| {
+            Info {
+                address: SocketAddr {
+                    ip: super::from_rtio(info.address.ip),
+                    port: info.address.port,
+                },
+                family: info.family,
+                socktype: None, // FIXME: this should use the above variable
+                protocol: None, // FIXME: this should use the above variable
+                flags: info.flags,
+            }
+        }).collect()),
+        Err(e) => Err(IoError::from_rtio_error(e)),
+    }
 }
 
 // Ignored on android since we cannot give tcp/ip
 // permission without help of apk
 #[cfg(test, not(target_os = "android"))]
 mod test {
-    use io::net::ip::Ipv4Addr;
-    use prelude::*;
-    use super::*;
-
     iotest!(fn dns_smoke_test() {
         let ipaddrs = get_host_addresses("localhost").unwrap();
         let mut found_local = false;
@@ -119,6 +138,6 @@ mod test {
     iotest!(fn issue_10663() {
         // Something should happen here, but this certainly shouldn't cause
         // everything to die. The actual outcome we don't care too much about.
-        get_host_addresses("example.com");
+        get_host_addresses("example.com").unwrap();
     } #[ignore])
 }

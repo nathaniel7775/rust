@@ -15,7 +15,7 @@ static MAX_LEN: uint = 20;
 static mut drop_counts: [uint, .. MAX_LEN] = [0, .. MAX_LEN];
 static mut clone_count: uint = 0;
 
-#[deriving(Rand, Ord, TotalEq, TotalOrd)]
+#[deriving(Rand, PartialEq, PartialOrd, Eq, Ord)]
 struct DropCounter { x: uint, clone_num: uint }
 
 impl Clone for DropCounter {
@@ -43,16 +43,18 @@ impl Drop for DropCounter {
 pub fn main() {
     // len can't go above 64.
     for len in range(2u, MAX_LEN) {
-        for _ in range(0, 10) {
-            let main = task_rng().gen_vec::<DropCounter>(len);
+        for _ in range(0i, 10) {
+            let main = task_rng().gen_iter::<DropCounter>()
+                                 .take(len)
+                                 .collect::<Vec<DropCounter>>();
 
             // work out the total number of comparisons required to sort
             // this array...
             let mut count = 0;
-            main.clone().sort_by(|a, b| { count += 1; a.cmp(b) });
+            main.clone().as_mut_slice().sort_by(|a, b| { count += 1; a.cmp(b) });
 
             // ... and then fail on each and every single one.
-            for fail_countdown in range(0, count) {
+            for fail_countdown in range(0i, count) {
                 // refresh the counters.
                 unsafe {
                     drop_counts = [0, .. MAX_LEN];
@@ -64,7 +66,7 @@ pub fn main() {
                 task::try(proc() {
                         let mut v = v;
                         let mut fail_countdown = fail_countdown;
-                        v.sort_by(|a, b| {
+                        v.as_mut_slice().sort_by(|a, b| {
                                 if fail_countdown == 0 {
                                     fail!()
                                 }

@@ -8,30 +8,31 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+// ignore-pretty FIXME(#14193)
+
+#![feature(managed_boxes)]
 
 use std::cell::RefCell;
-use std::ptr;
+use std::gc::{Gc, GC};
 
 enum maybe_pointy {
     none,
-    p(@RefCell<Pointy>),
+    p(Gc<RefCell<Pointy>>),
 }
 
 struct Pointy {
     a : maybe_pointy,
-    d : proc() -> uint,
+    d : proc():Send -> uint,
 }
 
-fn make_uniq_closure<A:Send>(a: A) -> proc() -> uint {
-    let result: proc() -> uint = proc() ptr::to_unsafe_ptr(&a) as uint;
-    result
+fn make_uniq_closure<A:Send>(a: A) -> proc():Send -> uint {
+    proc() { &a as *const A as uint }
 }
 
-fn empty_pointy() -> @RefCell<Pointy> {
-    return @RefCell::new(Pointy {
+fn empty_pointy() -> Gc<RefCell<Pointy>> {
+    return box(GC) RefCell::new(Pointy {
         a : none,
-        d : make_uniq_closure(~"hi")
+        d : make_uniq_closure("hi".to_string())
     })
 }
 
@@ -39,6 +40,6 @@ pub fn main() {
     let v = empty_pointy();
     {
         let mut vb = v.borrow_mut();
-        vb.get().a = p(v);
+        vb.a = p(v);
     }
 }

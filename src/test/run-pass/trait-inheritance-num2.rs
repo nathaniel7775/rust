@@ -1,6 +1,5 @@
-// xfail-fast
 
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -12,9 +11,7 @@
 
 // A more complex example of numeric extensions
 
-extern mod extra;
-
-use std::cmp::{Eq, Ord};
+use std::cmp::{PartialEq, PartialOrd};
 
 pub trait TypeExt {}
 
@@ -35,7 +32,7 @@ impl TypeExt for f32 {}
 impl TypeExt for f64 {}
 
 
-pub trait NumExt: TypeExt + Eq + Ord + Num + NumCast {}
+pub trait NumExt: TypeExt + PartialEq + PartialOrd + Num + NumCast {}
 
 impl NumExt for u8 {}
 impl NumExt for u16 {}

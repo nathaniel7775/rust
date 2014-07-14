@@ -18,6 +18,7 @@ This does not occur with concrete types, only with references
 to traits.
 */
 
+
 // original
 trait Inner {
     fn print(&self);
@@ -40,7 +41,7 @@ impl<'a> Outer<'a> {
 }
 
 pub fn main() {
-    let inner = 5;
+    let inner = 5i;
     let outer = Outer::new(&inner as &Inner);
     outer.inner.print();
 }
@@ -50,7 +51,7 @@ pub fn main() {
 trait MyTrait<T> { }
 
 pub struct MyContainer<'a, T> {
-    foos: ~[&'a MyTrait<T>],
+    foos: Vec<&'a MyTrait<T>> ,
 }
 
 impl<'a, T> MyContainer<'a, T> {

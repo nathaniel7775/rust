@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(globs)];
-#[deny(unused_imports)];
-#[allow(dead_code)];
+#![feature(globs)]
+#![deny(unused_imports)]
+#![allow(dead_code)]
 
 use cal = bar::c::cc;
 
-use std::util::*;              // shouldn't get errors for not using
-                                // everything imported
+use std::mem::*;            // shouldn't get errors for not using
+                            // everything imported
 
 // Should get errors for both 'Some' and 'None'
 use std::option::{Some, None}; //~ ERROR unused import
@@ -28,7 +28,12 @@ use test::B;
 
 // Make sure this import is warned about when at least one of its imported names
 // is unused
-use std::vec::{from_fn, from_elem};   //~ ERROR unused import
+use test2::{foo, bar}; //~ ERROR unused import
+
+mod test2 {
+    pub fn foo() {}
+    pub fn bar() {}
+}
 
 mod test {
     pub trait A { fn a(&self) {} }
@@ -39,30 +44,31 @@ mod test {
 }
 
 mod foo {
-    pub struct Point{x: int, y: int}
-    pub struct Square{p: Point, h: uint, w: uint}
+    pub struct Point{pub x: int, pub y: int}
+    pub struct Square{pub p: Point, pub h: uint, pub w: uint}
 }
 
 mod bar {
     // Don't ignore on 'pub use' because we're not sure if it's used or not
-    pub use std::cmp::Eq;
+    pub use std::cmp::PartialEq;
 
     pub mod c {
         use foo::Point;
         use foo::Square; //~ ERROR unused import
-        pub fn cc(p: Point) -> int { return 2 * (p.x + p.y); }
+        pub fn cc(p: Point) -> int { return 2i * (p.x + p.y); }
     }
 
     #[allow(unused_imports)]
     mod foo {
-        use std::cmp::Eq;
+        use std::cmp::PartialEq;
     }
 }
 
 fn main() {
     cal(foo::Point{x:3, y:9});
-    let a = 3;
-    id(a);
+    let mut a = 3i;
+    let mut b = 4i;
+    swap(&mut a, &mut b);
     test::C.b();
-    let _a = from_elem(0, 0);
+    let _a = foo();
 }

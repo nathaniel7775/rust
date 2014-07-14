@@ -38,8 +38,10 @@
 		<keyword>as</keyword>
 		<keyword>assert</keyword>
 		<keyword>break</keyword>
+		<keyword>box</keyword>
 		<keyword>const</keyword>
 		<keyword>continue</keyword>
+		<keyword>crate</keyword>
 		<keyword>do</keyword>
 		<keyword>drop</keyword>
 		<keyword>else</keyword>
@@ -281,7 +283,7 @@
     </context>
 
     <context id="attribute" style-ref="attribute" class="attribute">
-      <start extended="true">\#\[</start>
+      <start extended="true">\#!?\[</start>
       <end>\]</end>
       <include>
         <context ref="def:in-comment"/>

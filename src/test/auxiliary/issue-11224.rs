@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[deny(dead_code)];
+#![deny(dead_code)]
 
 mod inner {
     pub trait Trait {
@@ -21,6 +21,6 @@ mod inner {
 }
 
 pub fn foo() {
-    let a = &1 as &inner::Trait;
+    let a = &1i as &inner::Trait;
     a.f();
 }

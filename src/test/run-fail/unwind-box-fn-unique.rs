@@ -8,19 +8,23 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
 // error-pattern:fail
+
+extern crate debug;
+
+use std::gc::{GC, Gc};
 
 fn failfn() {
     fail!();
 }
 
 fn main() {
-    let y = ~0;
-    let x: @proc() = @(proc() {
-        error!("{:?}", y.clone());
+    let y = box 0i;
+    let x: Gc<proc():Send> = box(GC) (proc() {
+        println!("{:?}", y.clone());
     });
     failfn();
-    error!("{:?}", x);
+    println!("{:?}", x);
 }

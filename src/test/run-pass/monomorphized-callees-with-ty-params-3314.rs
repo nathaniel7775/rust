@@ -8,9 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
-
-extern mod extra;
+#![feature(managed_boxes)]
 
 trait Serializer {
 }
@@ -35,9 +33,9 @@ impl Serializer for int {
 }
 
 pub fn main() {
-    let foo = F { a: 1 };
+    let foo = F { a: 1i };
     foo.serialize(1i);
 
-    let bar = F { a: F {a: 1 } };
+    let bar = F { a: F {a: 1i } };
     bar.serialize(2i);
 }

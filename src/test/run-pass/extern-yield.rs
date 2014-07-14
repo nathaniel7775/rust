@@ -8,13 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::libc;
+extern crate libc;
 use std::task;
 
 mod rustrt {
-    use std::libc;
+    extern crate libc;
 
-    #[link(name = "rustrt")]
+    #[link(name = "rust_test_helpers")]
     extern {
         pub fn rust_dbg_call(cb: extern "C" fn (libc::uintptr_t) -> libc::uintptr_t,
                              data: libc::uintptr_t)
@@ -41,7 +41,7 @@ pub fn main() {
     for _ in range(0, 10u) {
         task::spawn(proc() {
             let result = count(5u);
-            info!("result = {}", result);
+            println!("result = {}", result);
             assert_eq!(result, 16u);
         });
     }

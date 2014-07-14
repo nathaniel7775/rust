@@ -8,13 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[cfg(rustpkg)]
-extern mod this = "rustpkg";
-
 #[cfg(rustdoc)]
-extern mod this = "rustdoc";
+extern crate this = "rustdoc";
 
 #[cfg(rustc)]
-extern mod this = "rustc";
+extern crate this = "rustc";
 
 fn main() { this::main() }

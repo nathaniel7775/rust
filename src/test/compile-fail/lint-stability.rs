@@ -1,4 +1,4 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,21 +8,20 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-fast aux-build
 // aux-build:lint_stability.rs
+// aux-build:inherited_stability.rs
 
-#[feature(globs)];
-#[deny(unstable)];
-#[deny(deprecated)];
-#[deny(experimental)];
-#[allow(dead_code)];
+#![feature(globs)]
+#![deny(unstable)]
+#![deny(deprecated)]
+#![deny(experimental)]
+#![allow(dead_code)]
 
 mod cross_crate {
-    extern mod lint_stability;
+    extern crate lint_stability;
     use self::lint_stability::*;
 
     fn test() {
-        // FIXME: attributes on methods are not encoded cross crate.
         let foo = MethodTester;
 
         deprecated(); //~ ERROR use of deprecated item
@@ -101,6 +100,14 @@ mod cross_crate {
         let _ = StableVariant;
         let _ = FrozenVariant;
         let _ = LockedVariant;
+
+        let _ = DeprecatedTupleStruct (1); //~ ERROR use of deprecated item
+        let _ = ExperimentalTupleStruct (1); //~ ERROR use of experimental item
+        let _ = UnstableTupleStruct (1); //~ ERROR use of unstable item
+        let _ = UnmarkedTupleStruct (1); //~ ERROR use of unmarked item
+        let _ = StableTupleStruct (1);
+        let _ = FrozenTupleStruct (1);
+        let _ = LockedTupleStruct (1);
     }
 
     fn test_method_param<F: Trait>(foo: F) {
@@ -123,6 +130,29 @@ mod cross_crate {
         foo.trait_unstable_text(); //~ ERROR use of unstable item: text
         foo.trait_unmarked(); //~ ERROR use of unmarked item
         foo.trait_stable();
+    }
+}
+
+mod inheritance {
+    extern crate inherited_stability;
+    use self::inherited_stability::*;
+
+    fn test_inheritance() {
+        experimental(); //~ ERROR use of experimental item
+        stable();
+
+        stable_mod::experimental(); //~ ERROR use of experimental item
+        stable_mod::stable();
+
+        experimental_mod::experimental(); //~ ERROR use of experimental item
+        experimental_mod::stable();
+
+        let _ = ExperimentalVariant; //~ ERROR use of experimental item
+        let _ = StableVariant;
+
+        let x: uint = 0;
+        x.experimental(); //~ ERROR use of experimental item
+        x.stable();
     }
 }
 
@@ -277,36 +307,54 @@ mod this_crate {
         LockedVariant,
     }
 
+    #[deprecated]
+    pub struct DeprecatedTupleStruct(int);
+    #[experimental]
+    pub struct ExperimentalTupleStruct(int);
+    #[unstable]
+    pub struct UnstableTupleStruct(int);
+    pub struct UnmarkedTupleStruct(int);
+    #[stable]
+    pub struct StableTupleStruct(int);
+    #[frozen]
+    pub struct FrozenTupleStruct(int);
+    #[locked]
+    pub struct LockedTupleStruct(int);
+
     fn test() {
+        // None of the following should generate errors, because
+        // stability attributes now have meaning only *across* crates,
+        // not within a single crate.
+
         let foo = MethodTester;
 
-        deprecated(); //~ ERROR use of deprecated item
-        foo.method_deprecated(); //~ ERROR use of deprecated item
-        foo.trait_deprecated(); //~ ERROR use of deprecated item
+        deprecated();
+        foo.method_deprecated();
+        foo.trait_deprecated();
 
-        deprecated_text(); //~ ERROR use of deprecated item: text
-        foo.method_deprecated_text(); //~ ERROR use of deprecated item: text
-        foo.trait_deprecated_text(); //~ ERROR use of deprecated item: text
+        deprecated_text();
+        foo.method_deprecated_text();
+        foo.trait_deprecated_text();
 
-        experimental(); //~ ERROR use of experimental item
-        foo.method_experimental(); //~ ERROR use of experimental item
-        foo.trait_experimental(); //~ ERROR use of experimental item
+        experimental();
+        foo.method_experimental();
+        foo.trait_experimental();
 
-        experimental_text(); //~ ERROR use of experimental item: text
-        foo.method_experimental_text(); //~ ERROR use of experimental item: text
-        foo.trait_experimental_text(); //~ ERROR use of experimental item: text
+        experimental_text();
+        foo.method_experimental_text();
+        foo.trait_experimental_text();
 
-        unstable(); //~ ERROR use of unstable item
-        foo.method_unstable(); //~ ERROR use of unstable item
-        foo.trait_unstable(); //~ ERROR use of unstable item
+        unstable();
+        foo.method_unstable();
+        foo.trait_unstable();
 
-        unstable_text(); //~ ERROR use of unstable item: text
-        foo.method_unstable_text(); //~ ERROR use of unstable item: text
-        foo.trait_unstable_text(); //~ ERROR use of unstable item: text
+        unstable_text();
+        foo.method_unstable_text();
+        foo.trait_unstable_text();
 
-        unmarked(); //~ ERROR use of unmarked item
-        foo.method_unmarked(); //~ ERROR use of unmarked item
-        foo.trait_unmarked(); //~ ERROR use of unmarked item
+        unmarked();
+        foo.method_unmarked();
+        foo.trait_unmarked();
 
         stable();
         foo.method_stable();
@@ -333,50 +381,58 @@ mod this_crate {
         foo.trait_locked_text();
 
 
-        let _ = DeprecatedStruct { i: 0 }; //~ ERROR use of deprecated item
-        let _ = ExperimentalStruct { i: 0 }; //~ ERROR use of experimental item
-        let _ = UnstableStruct { i: 0 }; //~ ERROR use of unstable item
-        let _ = UnmarkedStruct { i: 0 }; //~ ERROR use of unmarked item
+        let _ = DeprecatedStruct { i: 0 };
+        let _ = ExperimentalStruct { i: 0 };
+        let _ = UnstableStruct { i: 0 };
+        let _ = UnmarkedStruct { i: 0 };
         let _ = StableStruct { i: 0 };
         let _ = FrozenStruct { i: 0 };
         let _ = LockedStruct { i: 0 };
 
-        let _ = DeprecatedUnitStruct; //~ ERROR use of deprecated item
-        let _ = ExperimentalUnitStruct; //~ ERROR use of experimental item
-        let _ = UnstableUnitStruct; //~ ERROR use of unstable item
-        let _ = UnmarkedUnitStruct; //~ ERROR use of unmarked item
+        let _ = DeprecatedUnitStruct;
+        let _ = ExperimentalUnitStruct;
+        let _ = UnstableUnitStruct;
+        let _ = UnmarkedUnitStruct;
         let _ = StableUnitStruct;
         let _ = FrozenUnitStruct;
         let _ = LockedUnitStruct;
 
-        let _ = DeprecatedVariant; //~ ERROR use of deprecated item
-        let _ = ExperimentalVariant; //~ ERROR use of experimental item
-        let _ = UnstableVariant; //~ ERROR use of unstable item
-        let _ = UnmarkedVariant; //~ ERROR use of unmarked item
+        let _ = DeprecatedVariant;
+        let _ = ExperimentalVariant;
+        let _ = UnstableVariant;
+        let _ = UnmarkedVariant;
         let _ = StableVariant;
         let _ = FrozenVariant;
         let _ = LockedVariant;
+
+        let _ = DeprecatedTupleStruct (1);
+        let _ = ExperimentalTupleStruct (1);
+        let _ = UnstableTupleStruct (1);
+        let _ = UnmarkedTupleStruct (1);
+        let _ = StableTupleStruct (1);
+        let _ = FrozenTupleStruct (1);
+        let _ = LockedTupleStruct (1);
     }
 
     fn test_method_param<F: Trait>(foo: F) {
-        foo.trait_deprecated(); //~ ERROR use of deprecated item
-        foo.trait_deprecated_text(); //~ ERROR use of deprecated item: text
-        foo.trait_experimental(); //~ ERROR use of experimental item
-        foo.trait_experimental_text(); //~ ERROR use of experimental item: text
-        foo.trait_unstable(); //~ ERROR use of unstable item
-        foo.trait_unstable_text(); //~ ERROR use of unstable item: text
-        foo.trait_unmarked(); //~ ERROR use of unmarked item
+        foo.trait_deprecated();
+        foo.trait_deprecated_text();
+        foo.trait_experimental();
+        foo.trait_experimental_text();
+        foo.trait_unstable();
+        foo.trait_unstable_text();
+        foo.trait_unmarked();
         foo.trait_stable();
     }
 
     fn test_method_object(foo: &Trait) {
-        foo.trait_deprecated(); //~ ERROR use of deprecated item
-        foo.trait_deprecated_text(); //~ ERROR use of deprecated item: text
-        foo.trait_experimental(); //~ ERROR use of experimental item
-        foo.trait_experimental_text(); //~ ERROR use of experimental item: text
-        foo.trait_unstable(); //~ ERROR use of unstable item
-        foo.trait_unstable_text(); //~ ERROR use of unstable item: text
-        foo.trait_unmarked(); //~ ERROR use of unmarked item
+        foo.trait_deprecated();
+        foo.trait_deprecated_text();
+        foo.trait_experimental();
+        foo.trait_experimental_text();
+        foo.trait_unstable();
+        foo.trait_unstable_text();
+        foo.trait_unmarked();
         foo.trait_stable();
     }
 }

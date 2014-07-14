@@ -9,9 +9,9 @@
 // except according to those terms.
 
 pub fn main() {
-    ~100;
+    box 100i;
 }
 
 fn vec() {
-    ~[0];
+    vec!(0i);
 }

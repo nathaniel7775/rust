@@ -8,11 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+extern crate debug;
+
 fn main() {
-    let y: ~int = ~42;
-    let mut x: ~int;
+    let y: Box<int> = box 42;
+    let mut x: Box<int>;
     loop {
-        info!("{:?}", y);
+        println!("{:?}", y);
         loop {
             loop {
                 loop {

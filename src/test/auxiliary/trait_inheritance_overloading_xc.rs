@@ -8,13 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::cmp::Eq;
+use std::cmp::PartialEq;
 
-pub trait MyNum : Add<Self,Self> + Sub<Self,Self> + Mul<Self,Self> + Eq {
+pub trait MyNum : Add<Self,Self> + Sub<Self,Self> + Mul<Self,Self> + PartialEq {
 }
 
+#[deriving(Show)]
 pub struct MyInt {
-    val: int
+    pub val: int
 }
 
 impl Add<MyInt, MyInt> for MyInt {
@@ -29,7 +30,7 @@ impl Mul<MyInt, MyInt> for MyInt {
     fn mul(&self, other: &MyInt) -> MyInt { mi(self.val * other.val) }
 }
 
-impl Eq for MyInt {
+impl PartialEq for MyInt {
     fn eq(&self, other: &MyInt) -> bool { self.val == other.val }
 
     fn ne(&self, other: &MyInt) -> bool { !self.eq(other) }

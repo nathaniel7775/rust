@@ -8,15 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-android (FIXME #11419)
+// ignore-android (FIXME #11419)
 // error-pattern:explicit failure
 
-#[no_uv];
-
-extern mod native;
+extern crate native;
 
 #[start]
-fn start(argc: int, argv: **u8) -> int {
+fn start(argc: int, argv: *const *const u8) -> int {
     native::start(argc, argv, proc() {
         fail!();
     })

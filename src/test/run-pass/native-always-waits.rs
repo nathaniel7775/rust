@@ -8,15 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-fast
-// xfail-android (FIXME #11419)
+// ignore-android (FIXME #11419)
 
-extern mod native;
+extern crate native;
 
 static mut set: bool = false;
 
 #[start]
-fn start(argc: int, argv: **u8) -> int {
+fn start(argc: int, argv: *const *const u8) -> int {
     // make sure that native::start always waits for all children to finish
     native::start(argc, argv, proc() {
         spawn(proc() {

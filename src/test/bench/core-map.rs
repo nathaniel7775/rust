@@ -8,16 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
+extern crate time;
 
-use extra::time;
-use extra::treemap::TreeMap;
-use std::hashmap::{HashMap, HashSet};
+use std::collections::{TrieMap, TreeMap, HashMap, HashSet};
 use std::os;
 use std::rand::{Rng, IsaacRng, SeedableRng};
-use std::trie::TrieMap;
 use std::uint;
-use std::vec;
 
 fn timed(label: &str, f: ||) {
     let start = time::precise_time_s();
@@ -92,15 +88,16 @@ fn vector<M: MutableMap<uint, uint>>(map: &mut M, n_keys: uint, dist: &[uint]) {
 
 fn main() {
     let args = os::args();
+    let args = args.as_slice();
     let n_keys = {
         if args.len() == 2 {
-            from_str::<uint>(args[1]).unwrap()
+            from_str::<uint>(args[1].as_slice()).unwrap()
         } else {
             1000000
         }
     };
 
-    let mut rand = vec::with_capacity(n_keys);
+    let mut rand = Vec::with_capacity(n_keys);
 
     {
         let mut rng: IsaacRng = SeedableRng::from_seed(&[1, 1, 1, 1, 1, 1, 1]);
@@ -131,7 +128,7 @@ fn main() {
     {
         println!(" Random integers:");
         let mut map: TreeMap<uint,uint> = TreeMap::new();
-        vector(&mut map, n_keys, rand);
+        vector(&mut map, n_keys, rand.as_slice());
     }
 
     // FIXME: #9970
@@ -150,7 +147,7 @@ fn main() {
     {
         println!(" Random integers:");
         let mut map: HashMap<uint,uint> = HashMap::new();
-        vector(&mut map, n_keys, rand);
+        vector(&mut map, n_keys, rand.as_slice());
     }
 
     // FIXME: #9970
@@ -169,6 +166,6 @@ fn main() {
     {
         println!(" Random integers:");
         let mut map: TrieMap<uint> = TrieMap::new();
-        vector(&mut map, n_keys, rand);
+        vector(&mut map, n_keys, rand.as_slice());
     }
 }

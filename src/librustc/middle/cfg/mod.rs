@@ -17,26 +17,25 @@ Uses `Graph` as the underlying representation.
 
 use middle::graph;
 use middle::ty;
-use middle::typeck;
-use std::hashmap::HashMap;
 use syntax::ast;
-use syntax::opt_vec::OptVec;
+use util::nodemap::NodeMap;
 
 mod construct;
+pub mod graphviz;
 
 pub struct CFG {
-    exit_map: HashMap<ast::NodeId, CFGIndex>,
-    graph: CFGGraph,
-    entry: CFGIndex,
-    exit: CFGIndex,
+    pub exit_map: NodeMap<CFGIndex>,
+    pub graph: CFGGraph,
+    pub entry: CFGIndex,
+    pub exit: CFGIndex,
 }
 
 pub struct CFGNodeData {
-    id: ast::NodeId
+    pub id: ast::NodeId
 }
 
 pub struct CFGEdgeData {
-    exiting_scopes: OptVec<ast::NodeId>
+    pub exiting_scopes: Vec<ast::NodeId>
 }
 
 pub type CFGIndex = graph::NodeIndex;
@@ -47,15 +46,9 @@ pub type CFGNode = graph::Node<CFGNodeData>;
 
 pub type CFGEdge = graph::Edge<CFGEdgeData>;
 
-pub struct CFGIndices {
-    entry: CFGIndex,
-    exit: CFGIndex,
-}
-
 impl CFG {
-    pub fn new(tcx: ty::ctxt,
-               method_map: typeck::method_map,
+    pub fn new(tcx: &ty::ctxt,
                blk: &ast::Block) -> CFG {
-        construct::construct(tcx, method_map, blk)
+        construct::construct(tcx, blk)
     }
 }

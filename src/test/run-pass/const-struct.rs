@@ -10,9 +10,10 @@
 
 use std::cmp;
 
+#[deriving(Show)]
 struct foo { a: int, b: int, c: int }
 
-impl cmp::Eq for foo {
+impl cmp::PartialEq for foo {
     fn eq(&self, other: &foo) -> bool {
         (*self).a == (*other).a &&
         (*self).b == (*other).b &&

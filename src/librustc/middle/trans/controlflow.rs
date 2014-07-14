@@ -9,26 +9,29 @@
 // except according to those terms.
 
 use lib::llvm::*;
+use driver::config::FullDebugInfo;
+use middle::def;
 use middle::lang_items::{FailFnLangItem, FailBoundsCheckFnLangItem};
 use middle::trans::base::*;
 use middle::trans::build::*;
 use middle::trans::callee;
+use middle::trans::cleanup::CleanupMethods;
+use middle::trans::cleanup;
 use middle::trans::common::*;
 use middle::trans::debuginfo;
-use middle::trans::cleanup;
-use middle::trans::cleanup::CleanupMethods;
 use middle::trans::expr;
 use middle::ty;
-use util::ppaux;
 use util::ppaux::Repr;
 
-use middle::trans::type_::Type;
-
 use syntax::ast;
-use syntax::ast::Name;
+use syntax::ast::Ident;
 use syntax::ast_util;
 use syntax::codemap::Span;
+use syntax::parse::token::InternedString;
+use syntax::parse::token;
 use syntax::visit::Visitor;
+
+use std::gc::Gc;
 
 pub fn trans_stmt<'a>(cx: &'a Block<'a>,
                       s: &ast::Stmt)
@@ -38,7 +41,7 @@ pub fn trans_stmt<'a>(cx: &'a Block<'a>,
     debug!("trans_stmt({})", s.repr(cx.tcx()));
 
     if cx.sess().asm_comments() {
-        add_span_comment(cx, s.span, s.repr(cx.tcx()));
+        add_span_comment(cx, s.span, s.repr(cx.tcx()).as_slice());
     }
 
     let mut bcx = cx;
@@ -47,18 +50,18 @@ pub fn trans_stmt<'a>(cx: &'a Block<'a>,
     fcx.push_ast_cleanup_scope(id);
 
     match s.node {
-        ast::StmtExpr(e, _) | ast::StmtSemi(e, _) => {
-            bcx = expr::trans_into(cx, e, expr::Ignore);
+        ast::StmtExpr(ref e, _) | ast::StmtSemi(ref e, _) => {
+            bcx = trans_stmt_semi(bcx, &**e);
         }
         ast::StmtDecl(d, _) => {
             match d.node {
                 ast::DeclLocal(ref local) => {
-                    bcx = init_local(bcx, *local);
-                    if cx.sess().opts.extra_debuginfo {
-                        debuginfo::create_local_var_metadata(bcx, *local);
+                    bcx = init_local(bcx, &**local);
+                    if cx.sess().opts.debuginfo == FullDebugInfo {
+                        debuginfo::create_local_var_metadata(bcx, &**local);
                     }
                 }
-                ast::DeclItem(i) => trans_item(cx.fcx.ccx, i)
+                ast::DeclItem(ref i) => trans_item(cx.fcx.ccx, &**i)
             }
         }
         ast::StmtMac(..) => cx.tcx().sess.bug("unexpanded macro")
@@ -70,9 +73,19 @@ pub fn trans_stmt<'a>(cx: &'a Block<'a>,
     return bcx;
 }
 
+pub fn trans_stmt_semi<'a>(cx: &'a Block<'a>, e: &ast::Expr) -> &'a Block<'a> {
+    let _icx = push_ctxt("trans_stmt_semi");
+    let ty = expr_ty(cx, e);
+    if ty::type_needs_drop(cx.tcx(), ty) {
+        expr::trans_to_lvalue(cx, e, "stmt").bcx
+    } else {
+        expr::trans_into(cx, e, expr::Ignore)
+    }
+}
+
 pub fn trans_block<'a>(bcx: &'a Block<'a>,
                        b: &ast::Block,
-                       dest: expr::Dest)
+                       mut dest: expr::Dest)
                        -> &'a Block<'a> {
     let _icx = push_ctxt("trans_block");
     let fcx = bcx.fcx;
@@ -81,11 +94,19 @@ pub fn trans_block<'a>(bcx: &'a Block<'a>,
     fcx.push_ast_cleanup_scope(b.id);
 
     for s in b.stmts.iter() {
-        bcx = trans_stmt(bcx, *s);
+        bcx = trans_stmt(bcx, &**s);
     }
+
+    if dest != expr::Ignore {
+        let block_ty = node_id_type(bcx, b.id);
+        if b.expr.is_none() || type_is_zero_size(bcx.ccx(), block_ty) {
+            dest = expr::Ignore;
+        }
+    }
+
     match b.expr {
-        Some(e) => {
-            bcx = expr::trans_into(bcx, e, dest);
+        Some(ref e) => {
+            bcx = expr::trans_into(bcx, &**e, dest);
         }
         None => {
             assert!(dest == expr::Ignore || bcx.unreachable.get());
@@ -101,12 +122,12 @@ pub fn trans_if<'a>(bcx: &'a Block<'a>,
                     if_id: ast::NodeId,
                     cond: &ast::Expr,
                     thn: ast::P<ast::Block>,
-                    els: Option<@ast::Expr>,
+                    els: Option<Gc<ast::Expr>>,
                     dest: expr::Dest)
                     -> &'a Block<'a> {
     debug!("trans_if(bcx={}, if_id={}, cond={}, thn={:?}, dest={})",
-           bcx.to_str(), if_id, bcx.expr_to_str(cond), thn.id,
-           dest.to_str(bcx.ccx()));
+           bcx.to_str(), if_id, bcx.expr_to_string(cond), thn.id,
+           dest.to_string(bcx.ccx()));
     let _icx = push_ctxt("trans_if");
     let mut bcx = bcx;
 
@@ -118,21 +139,21 @@ pub fn trans_if<'a>(bcx: &'a Block<'a>,
             match els {
                 Some(elexpr) => {
                     let mut trans = TransItemVisitor { ccx: bcx.fcx.ccx };
-                    trans.visit_expr(elexpr, ());
+                    trans.visit_expr(&*elexpr, ());
                 }
                 None => {}
             }
             // if true { .. } [else { .. }]
-            bcx = trans_block(bcx, thn, dest);
+            bcx = trans_block(bcx, &*thn, dest);
             debuginfo::clear_source_location(bcx.fcx);
         } else {
             let mut trans = TransItemVisitor { ccx: bcx.fcx.ccx } ;
-            trans.visit_block(thn, ());
+            trans.visit_block(&*thn, ());
 
             match els {
                 // if false { .. } else { .. }
                 Some(elexpr) => {
-                    bcx = expr::trans_into(bcx, elexpr, dest);
+                    bcx = expr::trans_into(bcx, &*elexpr, dest);
                     debuginfo::clear_source_location(bcx.fcx);
                 }
 
@@ -145,15 +166,15 @@ pub fn trans_if<'a>(bcx: &'a Block<'a>,
     }
 
     let name = format!("then-block-{}-", thn.id);
-    let then_bcx_in = bcx.fcx.new_id_block(name, thn.id);
-    let then_bcx_out = trans_block(then_bcx_in, thn, dest);
+    let then_bcx_in = bcx.fcx.new_id_block(name.as_slice(), thn.id);
+    let then_bcx_out = trans_block(then_bcx_in, &*thn, dest);
     debuginfo::clear_source_location(bcx.fcx);
 
     let next_bcx;
     match els {
         Some(elexpr) => {
             let else_bcx_in = bcx.fcx.new_id_block("else-block", elexpr.id);
-            let else_bcx_out = expr::trans_into(else_bcx_in, elexpr, dest);
+            let else_bcx_out = expr::trans_into(else_bcx_in, &*elexpr, dest);
             next_bcx = bcx.fcx.join_blocks(if_id,
                                            [then_bcx_out, else_bcx_out]);
             CondBr(bcx, cond_val, then_bcx_in.llbb, else_bcx_in.llbb);
@@ -245,12 +266,16 @@ pub fn trans_loop<'a>(bcx:&'a Block<'a>,
 
     fcx.pop_loop_cleanup_scope(loop_id);
 
+    if ty::type_is_bot(node_id_type(bcx, loop_id)) {
+        Unreachable(next_bcx_in);
+    }
+
     return next_bcx_in;
 }
 
 pub fn trans_break_cont<'a>(bcx: &'a Block<'a>,
                             expr_id: ast::NodeId,
-                            opt_label: Option<Name>,
+                            opt_label: Option<Ident>,
                             exit: uint)
                             -> &'a Block<'a> {
     let _icx = push_ctxt("trans_break_cont");
@@ -264,11 +289,11 @@ pub fn trans_break_cont<'a>(bcx: &'a Block<'a>,
     let loop_id = match opt_label {
         None => fcx.top_loop_scope(),
         Some(_) => {
-            let def_map = bcx.tcx().def_map.borrow();
-            match def_map.get().find(&expr_id) {
-                Some(&ast::DefLabel(loop_id)) => loop_id,
+            match bcx.tcx().def_map.borrow().find(&expr_id) {
+                Some(&def::DefLabel(loop_id)) => loop_id,
                 ref r => {
-                    bcx.tcx().sess.bug(format!("{:?} in def-map for label", r))
+                    bcx.tcx().sess.bug(format!("{:?} in def-map for label",
+                                               r).as_slice())
                 }
             }
         }
@@ -283,20 +308,20 @@ pub fn trans_break_cont<'a>(bcx: &'a Block<'a>,
 
 pub fn trans_break<'a>(bcx: &'a Block<'a>,
                        expr_id: ast::NodeId,
-                       label_opt: Option<Name>)
+                       label_opt: Option<Ident>)
                        -> &'a Block<'a> {
     return trans_break_cont(bcx, expr_id, label_opt, cleanup::EXIT_BREAK);
 }
 
 pub fn trans_cont<'a>(bcx: &'a Block<'a>,
                       expr_id: ast::NodeId,
-                      label_opt: Option<Name>)
+                      label_opt: Option<Ident>)
                       -> &'a Block<'a> {
     return trans_break_cont(bcx, expr_id, label_opt, cleanup::EXIT_LOOP);
 }
 
 pub fn trans_ret<'a>(bcx: &'a Block<'a>,
-                     e: Option<@ast::Expr>)
+                     e: Option<Gc<ast::Expr>>)
                      -> &'a Block<'a> {
     let _icx = push_ctxt("trans_ret");
     let fcx = bcx.fcx;
@@ -307,7 +332,7 @@ pub fn trans_ret<'a>(bcx: &'a Block<'a>,
     };
     match e {
         Some(x) => {
-            bcx = expr::trans_into(bcx, x, dest);
+            bcx = expr::trans_into(bcx, &*x, dest);
         }
         _ => {}
     }
@@ -317,68 +342,33 @@ pub fn trans_ret<'a>(bcx: &'a Block<'a>,
     return bcx;
 }
 
-pub fn trans_fail_expr<'a>(
-                       bcx: &'a Block<'a>,
-                       sp_opt: Option<Span>,
-                       fail_expr: Option<@ast::Expr>)
-                       -> &'a Block<'a> {
-    let _icx = push_ctxt("trans_fail_expr");
-    let mut bcx = bcx;
-    match fail_expr {
-        Some(arg_expr) => {
-            let ccx = bcx.ccx();
-            let tcx = ccx.tcx;
-            let arg_datum =
-                unpack_datum!(bcx, expr::trans_to_lvalue(bcx, arg_expr, "fail"));
-
-            if ty::type_is_str(arg_datum.ty) {
-                let (lldata, _) = arg_datum.get_vec_base_and_len_no_root(bcx);
-                return trans_fail_value(bcx, sp_opt, lldata);
-            } else if bcx.unreachable.get() || ty::type_is_bot(arg_datum.ty) {
-                return bcx;
-            } else {
-                bcx.sess().span_bug(
-                    arg_expr.span, ~"fail called with unsupported type " +
-                    ppaux::ty_to_str(tcx, arg_datum.ty));
-            }
-        }
-        _ => trans_fail(bcx, sp_opt, @"explicit failure")
-    }
+fn str_slice_arg<'a>(bcx: &'a Block<'a>, s: InternedString) -> ValueRef {
+    let ccx = bcx.ccx();
+    let s = C_str_slice(ccx, s);
+    let slot = alloca(bcx, val_ty(s), "__temp");
+    Store(bcx, s, slot);
+    slot
 }
 
 pub fn trans_fail<'a>(
                   bcx: &'a Block<'a>,
-                  sp_opt: Option<Span>,
-                  fail_str: @str)
+                  sp: Span,
+                  fail_str: InternedString)
                   -> &'a Block<'a> {
-    let _icx = push_ctxt("trans_fail");
-    let V_fail_str = C_cstr(bcx.ccx(), fail_str);
-    return trans_fail_value(bcx, sp_opt, V_fail_str);
-}
-
-fn trans_fail_value<'a>(
-                    bcx: &'a Block<'a>,
-                    sp_opt: Option<Span>,
-                    V_fail_str: ValueRef)
-                    -> &'a Block<'a> {
-    let _icx = push_ctxt("trans_fail_value");
     let ccx = bcx.ccx();
-    let (V_filename, V_line) = match sp_opt {
-      Some(sp) => {
-        let sess = bcx.sess();
-        let loc = sess.parse_sess.cm.lookup_char_pos(sp.lo);
-        (C_cstr(bcx.ccx(), loc.file.name),
-         loc.line as int)
-      }
-      None => {
-        (C_cstr(bcx.ccx(), @"<runtime>"), 0)
-      }
-    };
-    let V_str = PointerCast(bcx, V_fail_str, Type::i8p());
-    let V_filename = PointerCast(bcx, V_filename, Type::i8p());
-    let args = ~[V_str, V_filename, C_int(ccx, V_line)];
-    let did = langcall(bcx, sp_opt, "", FailFnLangItem);
-    let bcx = callee::trans_lang_call(bcx, did, args, Some(expr::Ignore)).bcx;
+    let _icx = push_ctxt("trans_fail_value");
+
+    let v_str = str_slice_arg(bcx, fail_str);
+    let loc = bcx.sess().codemap().lookup_char_pos(sp.lo);
+    let filename = token::intern_and_get_ident(loc.file.name.as_slice());
+    let v_filename = str_slice_arg(bcx, filename);
+    let v_line = loc.line as int;
+    let args = vec!(v_str, v_filename, C_int(ccx, v_line));
+    let did = langcall(bcx, Some(sp), "", FailFnLangItem);
+    let bcx = callee::trans_lang_call(bcx,
+                                      did,
+                                      args.as_slice(),
+                                      Some(expr::Ignore)).bcx;
     Unreachable(bcx);
     return bcx;
 }
@@ -390,10 +380,20 @@ pub fn trans_fail_bounds_check<'a>(
                                len: ValueRef)
                                -> &'a Block<'a> {
     let _icx = push_ctxt("trans_fail_bounds_check");
-    let (filename, line) = filename_and_line_num_from_span(bcx, sp);
-    let args = ~[filename, line, index, len];
+
+    // Extract the file/line from the span
+    let loc = bcx.sess().codemap().lookup_char_pos(sp.lo);
+    let filename = token::intern_and_get_ident(loc.file.name.as_slice());
+
+    // Invoke the lang item
+    let filename = str_slice_arg(bcx, filename);
+    let line = C_int(bcx.ccx(), loc.line as int);
+    let args = vec!(filename, line, index, len);
     let did = langcall(bcx, Some(sp), "", FailBoundsCheckFnLangItem);
-    let bcx = callee::trans_lang_call(bcx, did, args, Some(expr::Ignore)).bcx;
+    let bcx = callee::trans_lang_call(bcx,
+                                      did,
+                                      args.as_slice(),
+                                      Some(expr::Ignore)).bcx;
     Unreachable(bcx);
     return bcx;
 }

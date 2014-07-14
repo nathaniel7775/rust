@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
 
 trait clam<A> {
   fn chowder(&self, y: A);
@@ -28,13 +27,13 @@ fn foo<A>(b: A) -> foo<A> {
     }
 }
 
-fn f<A>(x: @clam<A>, a: A) {
+fn f<A>(x: Box<clam<A>>, a: A) {
   x.chowder(a);
 }
 
 pub fn main() {
 
   let c = foo(42);
-  let d: @clam<int> = @c as @clam<int>;
+  let d: Box<clam<int>> = box c as Box<clam<int>>;
   f(d, c.x);
 }

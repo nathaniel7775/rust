@@ -8,16 +8,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::hashmap::HashMap;
+extern crate collections;
+
+use std::collections::HashMap;
 
 pub fn main() {
     let mut h = HashMap::new();
-    let kvs = [(1, 10), (2, 20), (3, 30)];
+    let kvs = [(1i, 10i), (2i, 20i), (3i, 30i)];
     for &(k,v) in kvs.iter() {
         h.insert(k,v);
     }
-    let mut x = 0;
-    let mut y = 0;
+    let mut x = 0i;
+    let mut y = 0i;
     for (&k,&v) in h.iter() {
         x += k;
         y += v;

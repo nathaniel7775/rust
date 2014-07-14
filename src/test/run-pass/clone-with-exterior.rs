@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
 use std::task::spawn;
 
 struct Pair {
@@ -17,9 +16,9 @@ struct Pair {
 }
 
 pub fn main() {
-    let z = ~Pair { a : 10, b : 12};
+    let z = box Pair { a : 10, b : 12};
 
-    let f: proc() = proc() {
+    let f: proc():Send = proc() {
         assert_eq!(z.a, 10);
         assert_eq!(z.b, 12);
     };

@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+extern crate debug;
+
 fn main() {
     let foo = 100;
 
@@ -15,5 +17,5 @@ fn main() {
         Bar = foo //~ ERROR attempt to use a non-constant value in a constant
     }
 
-    error!("{:?}", Bar);
+    println!("{:?}", Bar);
 }

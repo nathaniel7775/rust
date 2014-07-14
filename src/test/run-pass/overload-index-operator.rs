@@ -11,11 +11,12 @@
 // Test overloading of the `[]` operator.  In particular test that it
 // takes its argument *by reference*.
 
+extern crate debug;
+
 use std::ops::Index;
 
 struct AssociationList<K,V> {
-    pairs: ~[AssociationPair<K,V>]
-}
+    pairs: Vec<AssociationPair<K,V>> }
 
 #[deriving(Clone)]
 struct AssociationPair<K,V> {
@@ -29,11 +30,11 @@ impl<K,V> AssociationList<K,V> {
     }
 }
 
-impl<K:Eq,V:Clone> Index<K,V> for AssociationList<K,V> {
-    fn index(&self, index: &K) -> V {
+impl<K:PartialEq,V:Clone> Index<K,V> for AssociationList<K,V> {
+    fn index<'a>(&'a self, index: &K) -> &'a V {
         for pair in self.pairs.iter() {
             if pair.key == *index {
-                return pair.value.clone();
+                return &pair.value
             }
         }
         fail!("No value found for key: {:?}", index);
@@ -41,12 +42,12 @@ impl<K:Eq,V:Clone> Index<K,V> for AssociationList<K,V> {
 }
 
 pub fn main() {
-    let foo = ~"foo";
-    let bar = ~"bar";
+    let foo = "foo".to_string();
+    let bar = "bar".to_string();
 
-    let mut list = AssociationList {pairs: ~[]};
-    list.push(foo.clone(), 22);
-    list.push(bar.clone(), 44);
+    let mut list = AssociationList {pairs: Vec::new()};
+    list.push(foo.clone(), 22i);
+    list.push(bar.clone(), 44i);
 
     assert!(list[foo] == 22)
     assert!(list[bar] == 44)

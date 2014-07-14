@@ -11,13 +11,13 @@
 // This creates a bunch of descheduling tasks that run concurrently
 // while holding onto C stacks
 
-use std::libc;
+extern crate libc;
 use std::task;
 
 mod rustrt {
-    use std::libc;
+    extern crate libc;
 
-    #[link(name = "rustrt")]
+    #[link(name = "rust_test_helpers")]
     extern {
         pub fn rust_dbg_call(cb: extern "C" fn(libc::uintptr_t) -> libc::uintptr_t,
                              data: libc::uintptr_t)

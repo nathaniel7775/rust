@@ -8,7 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::hashmap::HashMap;
+extern crate collections;
+
+use std::collections::HashMap;
 
 trait Graph<Node, Edge> {
     fn f(&self, Edge);
@@ -22,6 +24,6 @@ impl<E> Graph<int, E> for HashMap<int, int> {
 }
 
 pub fn main() {
-    let g : ~HashMap<int, int> = ~HashMap::new();
-    let _g2 : ~Graph<int,int> = g as ~Graph<int,int>;
+    let g : Box<HashMap<int,int>> = box HashMap::new();
+    let _g2 : Box<Graph<int,int>> = g as Box<Graph<int,int>>;
 }

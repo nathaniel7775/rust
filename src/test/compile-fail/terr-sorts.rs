@@ -8,18 +8,20 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
+
+use std::gc::Gc;
 
 struct foo {
     a: int,
     b: int,
 }
 
-type bar = @foo;
+type bar = Gc<foo>;
 
 fn want_foo(f: foo) {}
 fn have_bar(b: bar) {
-    want_foo(b); //~ ERROR (expected struct foo but found @-ptr)
+    want_foo(b); //~ ERROR (expected struct foo but found Gc-ptr)
 }
 
 fn main() {}

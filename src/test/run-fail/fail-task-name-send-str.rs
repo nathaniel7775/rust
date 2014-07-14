@@ -11,10 +11,11 @@
 // error-pattern:task 'send name' failed at 'test'
 
 fn main() {
-    let mut t = ::std::task::task();
-    t.name("send name".to_send_str());
-    t.try(proc() {
-        fail!("test");
-        3
-    }).unwrap()
+    let r: Result<int,_> =
+        ::std::task::TaskBuilder::new().named("send name".into_maybe_owned())
+                                       .try(proc() {
+            fail!("test");
+            3i
+        });
+    assert!(r.is_ok());
 }

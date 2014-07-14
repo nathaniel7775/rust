@@ -1,5 +1,4 @@
-// xfail-fast #6330
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -9,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(struct_variant)];
+#![feature(struct_variant)]
 
 use std::rand;
 
@@ -34,7 +33,7 @@ enum D {
 
 pub fn main() {
     // check there's no segfaults
-    for _ in range(0, 20) {
+    for _ in range(0i, 20) {
         rand::random::<A>();
         rand::random::<B>();
         rand::random::<C>();

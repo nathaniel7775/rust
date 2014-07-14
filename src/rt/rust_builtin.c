@@ -10,7 +10,7 @@
 
 /* Foreign builtins. */
 
-#include "vg/valgrind.h"
+#include "valgrind/valgrind.h"
 
 #include <stdint.h>
 #include <time.h>
@@ -127,15 +127,6 @@ rust_list_dir_wfd_fp_buf(void* wfd) {
 }
 #endif
 
-typedef struct
-{
-    size_t fill;    // in bytes; if zero, heapified
-    size_t alloc;   // in bytes
-    uint8_t data[0];
-} rust_vec;
-
-typedef rust_vec rust_str;
-
 typedef struct {
     int32_t tm_sec;
     int32_t tm_min;
@@ -147,7 +138,6 @@ typedef struct {
     int32_t tm_yday;
     int32_t tm_isdst;
     int32_t tm_gmtoff;
-    rust_str *tm_zone;
     int32_t tm_nsec;
 } rust_tm;
 
@@ -164,8 +154,10 @@ void rust_tm_to_tm(rust_tm* in_tm, struct tm* out_tm) {
     out_tm->tm_isdst = in_tm->tm_isdst;
 }
 
-void tm_to_rust_tm(struct tm* in_tm, rust_tm* out_tm, int32_t gmtoff,
-                   const char *zone, int32_t nsec) {
+void tm_to_rust_tm(struct tm* in_tm,
+                   rust_tm* out_tm,
+                   int32_t gmtoff,
+                   int32_t nsec) {
     out_tm->tm_sec = in_tm->tm_sec;
     out_tm->tm_min = in_tm->tm_min;
     out_tm->tm_hour = in_tm->tm_hour;
@@ -177,13 +169,6 @@ void tm_to_rust_tm(struct tm* in_tm, rust_tm* out_tm, int32_t gmtoff,
     out_tm->tm_isdst = in_tm->tm_isdst;
     out_tm->tm_gmtoff = gmtoff;
     out_tm->tm_nsec = nsec;
-
-    if (zone != NULL) {
-        size_t size = strlen(zone);
-        assert(out_tm->tm_zone->alloc >= size);
-        memcpy(out_tm->tm_zone->data, zone, size);
-        out_tm->tm_zone->fill = size;
-    }
 }
 
 #if defined(__WIN32__)
@@ -225,7 +210,7 @@ rust_gmtime(int64_t sec, int32_t nsec, rust_tm *timeptr) {
     time_t s = sec;
     GMTIME(&s, &tm);
 
-    tm_to_rust_tm(&tm, timeptr, 0, "UTC", nsec);
+    tm_to_rust_tm(&tm, timeptr, 0, nsec);
 }
 
 void
@@ -234,28 +219,13 @@ rust_localtime(int64_t sec, int32_t nsec, rust_tm *timeptr) {
     time_t s = sec;
     LOCALTIME(&s, &tm);
 
-    const char* zone = NULL;
 #if defined(__WIN32__)
     int32_t gmtoff = -timezone;
-    wchar_t wbuffer[64] = {0};
-    char buffer[256] = {0};
-    // strftime("%Z") can contain non-UTF-8 characters on non-English locale (issue #9418),
-    // so time zone should be converted from UTF-16 string.
-    // Since wcsftime depends on setlocale() result,
-    // instead we convert it using MultiByteToWideChar.
-    if (strftime(buffer, sizeof(buffer) / sizeof(char), "%Z", &tm) > 0) {
-        // ANSI -> UTF-16
-        MultiByteToWideChar(CP_ACP, 0, buffer, -1, wbuffer, sizeof(wbuffer) / sizeof(wchar_t));
-        // UTF-16 -> UTF-8
-        WideCharToMultiByte(CP_UTF8, 0, wbuffer, -1, buffer, sizeof(buffer), NULL, NULL);
-        zone = buffer;
-    }
 #else
     int32_t gmtoff = tm.tm_gmtoff;
-    zone = tm.tm_zone;
 #endif
 
-    tm_to_rust_tm(&tm, timeptr, gmtoff, zone, nsec);
+    tm_to_rust_tm(&tm, timeptr, gmtoff, nsec);
 }
 
 int64_t
@@ -279,9 +249,14 @@ rust_opendir(char *dirname) {
     return opendir(dirname);
 }
 
-struct dirent*
-rust_readdir(DIR *dirp) {
-    return readdir(dirp);
+int
+rust_readdir_r(DIR *dirp, struct dirent *entry, struct dirent **result) {
+    return readdir_r(dirp, entry, result);
+}
+
+int
+rust_dirent_t_size() {
+    return sizeof(struct dirent);
 }
 
 #else
@@ -292,6 +267,10 @@ rust_opendir() {
 
 void
 rust_readdir() {
+}
+
+void
+rust_dirent_t_size() {
 }
 
 #endif
@@ -375,85 +354,6 @@ rust_unset_sigprocmask() {
     sigemptyset(&sset);
     sigprocmask(SIG_SETMASK, &sset, NULL);
 }
-
-#endif
-
-#if defined(__WIN32__)
-void
-win32_require(LPCTSTR fn, BOOL ok) {
-    if (!ok) {
-        LPTSTR buf;
-        DWORD err = GetLastError();
-        FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                      FORMAT_MESSAGE_FROM_SYSTEM |
-                      FORMAT_MESSAGE_IGNORE_INSERTS,
-                      NULL, err,
-                      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                      (LPTSTR) &buf, 0, NULL );
-        fprintf(stderr, "%s failed with error %ld: %s", fn, err, buf);
-        LocalFree((HLOCAL)buf);
-        abort();
-    }
-}
-
-void
-rust_win32_rand_acquire(HCRYPTPROV* phProv) {
-    win32_require
-        (_T("CryptAcquireContext"),
-         // changes to the parameters here should be reflected in the docs of
-         // std::rand::os::OSRng
-         CryptAcquireContext(phProv, NULL, NULL, PROV_RSA_FULL,
-                             CRYPT_VERIFYCONTEXT|CRYPT_SILENT));
-
-}
-void
-rust_win32_rand_gen(HCRYPTPROV hProv, DWORD dwLen, BYTE* pbBuffer) {
-    win32_require
-        (_T("CryptGenRandom"), CryptGenRandom(hProv, dwLen, pbBuffer));
-}
-void
-rust_win32_rand_release(HCRYPTPROV hProv) {
-    win32_require
-        (_T("CryptReleaseContext"), CryptReleaseContext(hProv, 0));
-}
-
-#else
-
-// these symbols are listed in rustrt.def.in, so they need to exist; but they
-// should never be called.
-
-void
-rust_win32_rand_acquire() {
-    abort();
-}
-void
-rust_win32_rand_gen() {
-    abort();
-}
-void
-rust_win32_rand_release() {
-    abort();
-}
-
-#endif
-
-#if defined(__WIN32__)
-
-int
-rust_crit_section_size() { return sizeof(CRITICAL_SECTION); }
-int
-rust_pthread_mutex_t_size() { return 0; }
-int
-rust_pthread_cond_t_size() { return 0; }
-
-#else
-
-int
-rust_crit_section_size() { return 0; }
-int
-rust_pthread_mutex_t_size() { return sizeof(pthread_mutex_t); }
-int
-rust_pthread_cond_t_size() { return sizeof(pthread_cond_t); }
 
 #endif
 

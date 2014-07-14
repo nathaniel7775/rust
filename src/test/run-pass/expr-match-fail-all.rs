@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -11,12 +11,12 @@
 
 
 
-// When all branches of an match expression result in fail, the entire
+// When all branches of a match expression result in fail, the entire
 // match expression results in fail.
 pub fn main() {
     let _x =
         match true {
-          true => { 10 }
+          true => { 10i }
           false => { match true { true => { fail!() } false => { fail!() } } }
         };
 }

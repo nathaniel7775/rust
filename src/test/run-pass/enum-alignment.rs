@@ -8,18 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::cast;
-use std::ptr;
 use std::mem;
 
 fn addr_of<T>(ptr: &T) -> uint {
-    let ptr = ptr::to_unsafe_ptr(ptr);
-    ptr as uint
+    ptr as *const T as uint
 }
 
 fn is_aligned<T>(ptr: &T) -> bool {
     unsafe {
-        let addr: uint = cast::transmute(ptr);
+        let addr: uint = mem::transmute(ptr);
         (addr % mem::min_align_of::<T>()) == 0
     }
 }

@@ -8,17 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
-#[deriving(Clone)]
-struct Foo {
-    a: ~str,
-}
+extern crate debug;
 
 pub fn main() {
-    let x = [ @[true], ..512 ];
-    let y = [ 0, ..1 ];
+    let x = [ [true], ..512 ];
+    let y = [ 0i, ..1 ];
 
-    error!("{:?}", x);
-    error!("{:?}", y);
+    println!("{:?}", x);
+    println!("{:?}", y);
 }

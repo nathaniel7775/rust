@@ -8,12 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-fast
-// xfail-android
+// ignore-android
+// ignore-pretty: does not work well with `--test`
 
-#[deny(unused_variable)];
+#![feature(quote)]
+#![deny(unused_variable)]
 
-extern mod syntax;
+extern crate syntax;
 
 use syntax::ext::base::ExtCtxt;
 

@@ -8,22 +8,20 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
-
 use std::str;
 
 pub fn main() {
     // Chars of 1, 2, 3, and 4 bytes
-    let chs: ~[char] = ~['e', 'é', '€', '\U00010000'];
-    let s: ~str = str::from_chars(chs);
-    let schs: ~[char] = s.chars().collect();
+    let chs: Vec<char> = vec!('e', 'é', '€', '\U00010000');
+    let s: String = str::from_chars(chs.as_slice()).to_string();
+    let schs: Vec<char> = s.as_slice().chars().collect();
 
     assert!(s.len() == 10u);
-    assert!(s.char_len() == 4u);
+    assert!(s.as_slice().char_len() == 4u);
     assert!(schs.len() == 4u);
-    assert!(str::from_chars(schs) == s);
-    assert!(s.char_at(0u) == 'e');
-    assert!(s.char_at(1u) == 'é');
+    assert!(str::from_chars(schs.as_slice()).to_string() == s);
+    assert!(s.as_slice().char_at(0u) == 'e');
+    assert!(s.as_slice().char_at(1u) == 'é');
 
     assert!((str::is_utf8(s.as_bytes())));
     // invalid prefix
@@ -40,14 +38,4 @@ pub fn main() {
     assert!((!str::is_utf8([0xf0_u8, 0x10_u8])));
     assert!((!str::is_utf8([0xf0_u8, 0xff_u8, 0x10_u8])));
     assert!((!str::is_utf8([0xf0_u8, 0xff_u8, 0xff_u8, 0x10_u8])));
-
-    let mut stack = ~"a×c€";
-    assert_eq!(stack.pop_char(), '€');
-    assert_eq!(stack.pop_char(), 'c');
-    stack.push_char('u');
-    assert!(stack == ~"a×u");
-    assert_eq!(stack.shift_char(), 'a');
-    assert_eq!(stack.shift_char(), '×');
-    stack.unshift_char('ß');
-    assert!(stack == ~"ßu");
 }

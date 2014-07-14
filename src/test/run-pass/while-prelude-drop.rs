@@ -8,13 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use std::string::String;
 
-#[deriving(Eq)]
-enum t { a, b(~str), }
+#[deriving(PartialEq)]
+enum t { a, b(String), }
 
 fn make(i: int) -> t {
     if i > 10 { return a; }
-    let mut s = ~"hello";
+    let mut s = String::from_str("hello");
     // Ensure s is non-const.
 
     s.push_str("there");

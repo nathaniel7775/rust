@@ -8,12 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes, unsafe_destructor)]
 
+extern crate debug;
 use std::cell::Cell;
+use std::gc::{Gc, GC};
 
 struct r {
-  i: @Cell<int>,
+  i: Gc<Cell<int>>,
 }
 
 #[unsafe_destructor]
@@ -25,16 +27,16 @@ impl Drop for r {
     }
 }
 
-fn f<T>(_i: ~[T], _j: ~[T]) {
+fn f<T>(_i: Vec<T> , _j: Vec<T> ) {
 }
 
 fn main() {
-    let i1 = @Cell::new(0);
-    let i2 = @Cell::new(1);
-    let r1 = ~[~r { i: i1 }];
-    let r2 = ~[~r { i: i2 }];
+    let i1 = box(GC) Cell::new(0);
+    let i2 = box(GC) Cell::new(1);
+    let r1 = vec!(box r { i: i1 });
+    let r2 = vec!(box r { i: i2 });
     f(r1.clone(), r2.clone());
     //~^ ERROR failed to find an implementation of
-    info!("{:?}", (r2, i1.get()));
-    info!("{:?}", (r1, i2.get()));
+    println!("{:?}", (r2, i1.get()));
+    println!("{:?}", (r1, i2.get()));
 }

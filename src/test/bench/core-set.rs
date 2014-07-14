@@ -1,6 +1,4 @@
-// xfail-pretty
-
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -10,13 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
+// ignore-pretty very bad with line comments
 
-use extra::bitv::BitvSet;
-use extra::treemap::TreeSet;
-use std::hashmap::HashSet;
+extern crate collections;
+extern crate rand;
+extern crate time;
+
+use std::collections::bitv::BitvSet;
+use std::collections::TreeSet;
+use std::collections::HashSet;
 use std::os;
-use std::rand;
 use std::uint;
 
 struct Results {
@@ -30,9 +31,9 @@ struct Results {
 }
 
 fn timed(result: &mut f64, op: ||) {
-    let start = extra::time::precise_time_s();
+    let start = time::precise_time_s();
     op();
-    let end = extra::time::precise_time_s();
+    let end = time::precise_time_s();
     *result = (end - start);
 }
 
@@ -79,7 +80,7 @@ impl Results {
         }
     }
 
-    pub fn bench_str<T:MutableSet<~str>,
+    pub fn bench_str<T:MutableSet<String>,
                      R:rand::Rng>(
                      &mut self,
                      rng: &mut R,
@@ -89,11 +90,11 @@ impl Results {
             let mut set = f();
             timed(&mut self.sequential_strings, || {
                 for i in range(0u, num_keys) {
-                    set.insert(i.to_str());
+                    set.insert(i.to_string());
                 }
 
                 for i in range(0u, num_keys) {
-                    assert!(set.contains(&i.to_str()));
+                    assert!(set.contains(&i.to_string()));
                 }
             })
         }
@@ -102,7 +103,7 @@ impl Results {
             let mut set = f();
             timed(&mut self.random_strings, || {
                 for _ in range(0, num_keys) {
-                    let s = rng.gen::<uint>().to_str();
+                    let s = rng.gen::<uint>().to_string();
                     set.insert(s);
                 }
             })
@@ -111,11 +112,11 @@ impl Results {
         {
             let mut set = f();
             for i in range(0u, num_keys) {
-                set.insert(i.to_str());
+                set.insert(i.to_string());
             }
             timed(&mut self.delete_strings, || {
                 for i in range(0u, num_keys) {
-                    assert!(set.remove(&i.to_str()));
+                    assert!(set.remove(&i.to_string()));
                 }
             })
         }
@@ -154,9 +155,10 @@ fn empty_results() -> Results {
 
 fn main() {
     let args = os::args();
+    let args = args.as_slice();
     let num_keys = {
         if args.len() == 2 {
-            from_str::<uint>(args[1]).unwrap()
+            from_str::<uint>(args[1].as_slice()).unwrap()
         } else {
             100 // woefully inadequate for any real measurement
         }
@@ -173,10 +175,10 @@ fn main() {
             s
         });
         results.bench_str(&mut rng, num_keys, || {
-            let s: HashSet<~str> = HashSet::new();
+            let s: HashSet<String> = HashSet::new();
             s
         });
-        write_results("std::hashmap::HashSet", &results);
+        write_results("collections::HashSet", &results);
     }
 
     {
@@ -187,16 +189,16 @@ fn main() {
             s
         });
         results.bench_str(&mut rng, num_keys, || {
-            let s: TreeSet<~str> = TreeSet::new();
+            let s: TreeSet<String> = TreeSet::new();
             s
         });
-        write_results("extra::treemap::TreeSet", &results);
+        write_results("collections::TreeSet", &results);
     }
 
     {
         let mut rng: rand::IsaacRng = rand::SeedableRng::from_seed(seed);
         let mut results = empty_results();
         results.bench_int(&mut rng, num_keys, max, || BitvSet::new());
-        write_results("extra::bitv::BitvSet", &results);
+        write_results("collections::bitv::BitvSet", &results);
     }
 }

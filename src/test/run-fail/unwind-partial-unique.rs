@@ -10,18 +10,20 @@
 
 // error-pattern:fail
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
-fn f() -> ~[int] { fail!(); }
+use std::gc::GC;
+
+fn f() -> Vec<int> { fail!(); }
 
 // Voodoo. In unwind-alt we had to do this to trigger the bug. Might
 // have been to do with memory allocation patterns.
 fn prime() {
-    @0;
+    box(GC) 0i;
 }
 
 fn partial() {
-    let _x = ~f();
+    let _x = box f();
 }
 
 fn main() {

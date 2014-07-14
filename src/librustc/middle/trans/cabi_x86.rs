@@ -9,7 +9,7 @@
 // except according to those terms.
 
 
-use syntax::abi::{OsWin32, OsMacos};
+use syntax::abi::{OsWin32, OsMacos, OsiOS};
 use lib::llvm::*;
 use super::cabi::*;
 use super::common::*;
@@ -20,11 +20,11 @@ pub fn compute_abi_info(ccx: &CrateContext,
                         atys: &[Type],
                         rty: Type,
                         ret_def: bool) -> FnType {
-    let mut arg_tys = ~[];
+    let mut arg_tys = Vec::new();
 
     let ret_ty;
     if !ret_def {
-        ret_ty = ArgType::direct(Type::void(), None, None, None);
+        ret_ty = ArgType::direct(Type::void(ccx), None, None, None);
     } else if rty.kind() == Struct {
         // Returning a structure. Most often, this will use
         // a hidden first argument. On some platforms, though,
@@ -35,13 +35,13 @@ pub fn compute_abi_info(ccx: &CrateContext,
         // Clang's ABI handling is in lib/CodeGen/TargetInfo.cpp
 
         enum Strategy { RetValue(Type), RetPointer }
-        let strategy = match ccx.sess.targ_cfg.os {
-            OsWin32 | OsMacos => {
+        let strategy = match ccx.sess().targ_cfg.os {
+            OsWin32 | OsMacos | OsiOS => {
                 match llsize_of_alloc(ccx, rty) {
-                    1 => RetValue(Type::i8()),
-                    2 => RetValue(Type::i16()),
-                    4 => RetValue(Type::i32()),
-                    8 => RetValue(Type::i64()),
+                    1 => RetValue(Type::i8(ccx)),
+                    2 => RetValue(Type::i16(ccx)),
+                    4 => RetValue(Type::i32(ccx)),
+                    8 => RetValue(Type::i64(ccx)),
                     _ => RetPointer
                 }
             }
@@ -59,11 +59,26 @@ pub fn compute_abi_info(ccx: &CrateContext,
             }
         }
     } else {
-        ret_ty = ArgType::direct(rty, None, None, None);
+        let attr = if rty == Type::i1(ccx) { Some(ZExtAttribute) } else { None };
+        ret_ty = ArgType::direct(rty, None, None, attr);
     }
 
-    for &a in atys.iter() {
-        arg_tys.push(ArgType::direct(a, None, None, None));
+    for &t in atys.iter() {
+        let ty = match t.kind() {
+            Struct => {
+                let size = llsize_of_alloc(ccx, t);
+                if size == 0 {
+                    ArgType::ignore(t)
+                } else {
+                    ArgType::indirect(t, Some(ByValAttribute))
+                }
+            }
+            _ => {
+                let attr = if t == Type::i1(ccx) { Some(ZExtAttribute) } else { None };
+                ArgType::direct(t, None, None, attr)
+            }
+        };
+        arg_tys.push(ty);
     }
 
     return FnType {

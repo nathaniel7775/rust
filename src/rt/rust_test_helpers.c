@@ -126,6 +126,29 @@ rust_dbg_extern_identity_TwoDoubles(struct TwoDoubles u) {
     return u;
 }
 
+struct ManyInts {
+    int8_t arg1;
+    int16_t arg2;
+    int32_t arg3;
+    int16_t arg4;
+    int8_t arg5;
+    struct TwoU8s arg6;
+};
+
+struct Empty {
+};
+
+void
+rust_dbg_extern_empty_struct(struct ManyInts v1, struct Empty e, struct ManyInts v2) {
+    assert(v1.arg1 == v2.arg1 + 1);
+    assert(v1.arg2 == v2.arg2 + 1);
+    assert(v1.arg3 == v2.arg3 + 1);
+    assert(v1.arg4 == v2.arg4 + 1);
+    assert(v1.arg5 == v2.arg5 + 1);
+    assert(v1.arg6.one == v2.arg6.one + 1);
+    assert(v1.arg6.two == v2.arg6.two + 1);
+}
+
 intptr_t
 rust_get_test_int() {
   return 1;
@@ -175,4 +198,22 @@ int rust_dbg_static_mut = 3;
 void
 rust_dbg_static_mut_check_four() {
     assert(rust_dbg_static_mut == 4);
+}
+
+struct S {
+    uint64_t x;
+    uint64_t y;
+    uint64_t z;
+};
+
+uint64_t get_x(struct S s) {
+    return s.x;
+}
+
+uint64_t get_y(struct S s) {
+    return s.y;
+}
+
+uint64_t get_z(struct S s) {
+    return s.z;
 }

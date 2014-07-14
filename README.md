@@ -5,40 +5,40 @@ documentation.
 
 ## Quick Start
 
-### Windows
-
-1. Download and use the [installer and MinGW][win-wiki].
+1. Download a [binary installer][installer] for your platform.
 2. Read the [tutorial].
-2. Enjoy!
+3. Enjoy!
 
 > ***Note:*** Windows users can read the detailed
 > [getting started][wiki-start] notes on the wiki.
 
-[tutorial]: http://static.rust-lang.org/doc/tutorial.html
-[wiki-start]: https://github.com/mozilla/rust/wiki/Note-getting-started-developing-Rust
-[win-wiki]: https://github.com/mozilla/rust/wiki/Using-Rust-on-Windows
+[installer]: http://www.rust-lang.org/install.html
+[tutorial]: http://doc.rust-lang.org/tutorial.html
+[wiki-start]: https://github.com/rust-lang/rust/wiki/Note-getting-started-developing-Rust
+[win-wiki]: https://github.com/rust-lang/rust/wiki/Using-Rust-on-Windows
 
-### Linux / OS X
+## Building from Source
 
 1. Make sure you have installed the dependencies:
-    * `g++` 4.4 or `clang++` 3.x
+    * `g++` 4.7 or `clang++` 3.x
     * `python` 2.6 or later (but not 3.x)
     * `perl` 5.0 or later
     * GNU `make` 3.81 or later
     * `curl`
+    * `git`
 2. Download and build Rust:
 
     You can either download a [tarball] or build directly from the [repo].
 
     To build from the [tarball] do:
 
-        $ curl -O http://static.rust-lang.org/dist/rust-0.9.tar.gz
-        $ tar -xzf rust-0.9.tar.gz
-        $ cd rust-0.9
+        $ curl -O http://static.rust-lang.org/dist/rust-nightly.tar.gz
+        $ tar -xzf rust-nightly.tar.gz
+        $ cd rust-nightly
 
     Or to build from the [repo] do:
 
-        $ git clone https://github.com/mozilla/rust.git
+        $ git clone https://github.com/rust-lang/rust.git
         $ cd rust
 
     Now that you have Rust's source code, you can configure and build it:
@@ -52,15 +52,31 @@ documentation.
     > options are also supported, pass `--help` for more information on them.
 
     When complete, `make install` will place several programs into
-    `/usr/local/bin`: `rustc`, the Rust compiler; `rustdoc`, the
-    API-documentation tool, and `rustpkg`, the Rust package manager and build
-    system.
+    `/usr/local/bin`: `rustc`, the Rust compiler, and `rustdoc`, the
+    API-documentation tool.
 3. Read the [tutorial].
 4. Enjoy!
 
-[repo]: https://github.com/mozilla/rust
-[tarball]: http://static.rust-lang.org/dist/rust-0.9.tar.gz
-[tutorial]: http://static.rust-lang.org/doc/0.9/tutorial.html
+### Building on Windows
+
+To easily build on windows we can use [MSYS2](http://sourceforge.net/projects/msys2/):
+
+1. Grab the latest MSYS2 installer and go through the installer.
+2. Now from the MSYS2 terminal we want to install the mingw64 toolchain and the other
+   tools we need.
+
+        $ pacman -S mingw-w64-i686-toolchain
+        $ pacman -S base-devel
+
+3. With that now start `mingw32_shell.bat` from where you installed MSYS2 (i.e. `C:\msys`).
+4. From there just navigate to where you have Rust's source code, configure and build it:
+
+        $ ./configure --build=i686-pc-mingw32
+        $ make && make install
+
+[repo]: https://github.com/rust-lang/rust
+[tarball]: http://static.rust-lang.org/dist/rust-nightly.tar.gz
+[tutorial]: http://doc.rust-lang.org/tutorial.html
 
 ## Notes
 
@@ -71,9 +87,9 @@ fetch snapshots, and an OS that can execute the available snapshot binaries.
 
 Snapshot binaries are currently built and tested on several platforms:
 
-* Windows (7, Server 2008 R2), x86 only
-* Linux (various distributions), x86 and x86-64
-* OSX 10.6 ("Snow Leopard") or greater, x86 and x86-64
+* Windows (7, 8, Server 2008 R2), x86 only
+* Linux (2.6.18 or later, various distributions), x86 and x86-64
+* OSX 10.7 (Lion) or greater, x86 and x86-64
 
 You may find that other platforms work, but these are our officially
 supported build environments that are most likely to work.
@@ -83,7 +99,7 @@ swap, it will take a very long time to build.
 
 There is a lot more documentation in the [wiki].
 
-[wiki]: https://github.com/mozilla/rust/wiki
+[wiki]: https://github.com/rust-lang/rust/wiki
 
 ## License
 

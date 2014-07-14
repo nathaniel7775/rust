@@ -8,47 +8,40 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
-#[allow(unnecessary_allocation)];
+#![feature(managed_boxes)]
+#![allow(unnecessary_allocation)]
 
 // Tests for a previous bug that occured due to an interaction
 // between struct field initialization and the auto-coercion
 // from a vector to a slice. The drop glue was being invoked on
 // the temporary slice with a wrong type, triggering an LLVM assert.
 
+
 struct Thing1<'a> {
-    baz: &'a [~int],
-    bar: ~u64,
+    baz: &'a [Box<int>],
+    bar: Box<u64>,
 }
 
 struct Thing2<'a> {
-    baz: &'a [~int],
+    baz: &'a [Box<int>],
     bar: u64,
 }
 
 pub fn main() {
     let _t1_fixed = Thing1 {
         baz: &[],
-        bar: ~32,
+        bar: box 32,
     };
     Thing1 {
-        baz: ~[],
-        bar: ~32,
-    };
-    let _t1_at = Thing1 {
-        baz: @[],
-        bar: ~32,
+        baz: Vec::new().as_slice(),
+        bar: box 32,
     };
     let _t2_fixed = Thing2 {
         baz: &[],
         bar: 32,
     };
     Thing2 {
-        baz: ~[],
-        bar: 32,
-    };
-    let _t2_at = Thing2 {
-        baz: @[],
+        baz: Vec::new().as_slice(),
         bar: 32,
     };
 }

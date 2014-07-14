@@ -9,8 +9,8 @@
 // except according to those terms.
 
 pub fn main() {
-    let (p, c) = Chan::new();
-    c.send(~100);
-    let v = p.recv();
-    assert_eq!(v, ~100);
+    let (tx, rx) = channel();
+    tx.send(box 100i);
+    let v = rx.recv();
+    assert_eq!(v, box 100i);
 }

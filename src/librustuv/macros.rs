@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[macro_escape];
+#![macro_escape]
 
 use std::fmt;
 
@@ -28,19 +28,7 @@ macro_rules! uvdebug (
 )
 
 pub fn dumb_println(args: &fmt::Arguments) {
-    use std::io;
-    use std::libc;
-
-    struct Stderr;
-    impl io::Writer for Stderr {
-        fn write(&mut self, data: &[u8]) {
-            unsafe {
-                libc::write(libc::STDERR_FILENO,
-                            data.as_ptr() as *libc::c_void,
-                            data.len() as libc::size_t);
-            }
-        }
-    }
-    let mut w = Stderr;
-    fmt::writeln(&mut w as &mut io::Writer, args);
+    use std::rt;
+    let mut w = rt::Stderr;
+    let _ = writeln!(&mut w, "{}", args);
 }

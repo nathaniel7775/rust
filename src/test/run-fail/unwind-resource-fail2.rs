@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,8 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-test leaks
+// ignore-test leaks
 // error-pattern:wombat
+
+use std::gc::GC;
 
 struct r {
     i: int,
@@ -22,7 +24,7 @@ impl Drop for r {
 fn r(i: int) -> r { r { i: i } }
 
 fn main() {
-    @0;
+    box(GC) 0;
     let r = r(0);
     fail!();
 }

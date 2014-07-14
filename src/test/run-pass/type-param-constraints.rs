@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-fast
+#![feature(managed_boxes)]
 
-#[feature(managed_boxes)];
+use std::gc::GC;
 
 fn p_foo<T>(_pinned: T) { }
 fn s_foo<T>(_shared: T) { }
@@ -32,18 +32,18 @@ fn r(i:int) -> r {
 
 pub fn main() {
     p_foo(r(10));
-    p_foo(@r(10));
+    p_foo(box(GC) r(10));
 
-    p_foo(~r(10));
-    p_foo(@10);
-    p_foo(~10);
-    p_foo(10);
+    p_foo(box r(10));
+    p_foo(box(GC) 10i);
+    p_foo(box 10i);
+    p_foo(10i);
 
-    s_foo(@r(10));
-    s_foo(@10);
-    s_foo(~10);
-    s_foo(10);
+    s_foo(box(GC) r(10));
+    s_foo(box(GC) 10i);
+    s_foo(box 10i);
+    s_foo(10i);
 
-    u_foo(~10);
-    u_foo(10);
+    u_foo(box 10i);
+    u_foo(10i);
 }

@@ -8,7 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
+
+use std::gc::Gc;
 
 struct point {
     x: int,
@@ -19,8 +21,8 @@ fn x_coord<'r>(p: &'r point) -> &'r int {
     return &p.x;
 }
 
-fn foo(p: @point) -> &int {
-    let xc = x_coord(p); //~ ERROR cannot root
+fn foo(p: Gc<point>) -> &int {
+    let xc = x_coord(p); //~ ERROR `*p` does not live long enough
     assert_eq!(*xc, 3);
     return xc;
 }

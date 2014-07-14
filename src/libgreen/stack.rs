@@ -8,16 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::rt::env::max_cached_stacks;
+use std::ptr;
+use std::sync::atomics;
 use std::os::{errno, page_size, MemoryMap, MapReadable, MapWritable,
-              MapNonStandardFlags, MapVirtual};
-use std::libc;
+              MapNonStandardFlags, getenv};
+use libc;
 
 /// A task's stack. The name "Stack" is a vestige of segmented stacks.
 pub struct Stack {
-    priv buf: MemoryMap,
-    priv min_size: uint,
-    priv valgrind_id: libc::c_uint,
+    buf: Option<MemoryMap>,
+    min_size: uint,
+    valgrind_id: libc::c_uint,
 }
 
 // Try to use MAP_STACK on platforms that support it (it's what we're doing
@@ -51,12 +52,12 @@ impl Stack {
         // page. It isn't guaranteed, but that's why FFI is unsafe. buf.data is
         // guaranteed to be aligned properly.
         if !protect_last_page(&stack) {
-            fail!("Could not memory-protect guard page. stack={:?}, errno={}",
-                  stack, errno());
+            fail!("Could not memory-protect guard page. stack={}, errno={}",
+                  stack.data(), errno());
         }
 
         let mut stk = Stack {
-            buf: stack,
+            buf: Some(stack),
             min_size: size,
             valgrind_id: 0
         };
@@ -71,22 +72,23 @@ impl Stack {
     /// Create a 0-length stack which starts (and ends) at 0.
     pub unsafe fn dummy_stack() -> Stack {
         Stack {
-            buf: MemoryMap { data: 0 as *mut u8, len: 0, kind: MapVirtual },
+            buf: None,
             min_size: 0,
             valgrind_id: 0
         }
     }
 
     /// Point to the low end of the allocated stack
-    pub fn start(&self) -> *uint {
-        self.buf.data as *uint
+    pub fn start(&self) -> *const uint {
+        self.buf.as_ref().map(|m| m.data() as *const uint)
+            .unwrap_or(ptr::null())
     }
 
     /// Point one uint beyond the high end of the allocated stack
-    pub fn end(&self) -> *uint {
-        unsafe {
-            self.buf.data.offset(self.buf.len as int) as *uint
-        }
+    pub fn end(&self) -> *const uint {
+        self.buf.as_ref().map(|buf| unsafe {
+            buf.data().offset(buf.len() as int) as *const uint
+        }).unwrap_or(ptr::null())
     }
 }
 
@@ -96,7 +98,7 @@ fn protect_last_page(stack: &MemoryMap) -> bool {
         // This may seem backwards: the start of the segment is the last page?
         // Yes! The stack grows from higher addresses (the end of the allocated
         // block) to lower addresses (the start of the allocated block).
-        let last_page = stack.data as *libc::c_void;
+        let last_page = stack.data() as *mut libc::c_void;
         libc::mprotect(last_page, page_size() as libc::size_t,
                        libc::PROT_NONE) != -1
     }
@@ -106,7 +108,7 @@ fn protect_last_page(stack: &MemoryMap) -> bool {
 fn protect_last_page(stack: &MemoryMap) -> bool {
     unsafe {
         // see above
-        let last_page = stack.data as *mut libc::c_void;
+        let last_page = stack.data() as *mut libc::c_void;
         let mut old_prot: libc::DWORD = 0;
         libc::VirtualProtect(last_page, page_size() as libc::SIZE_T,
                              libc::PAGE_NOACCESS,
@@ -124,23 +126,23 @@ impl Drop for Stack {
 }
 
 pub struct StackPool {
-    // Ideally this would be some datastructure that preserved ordering on
+    // Ideally this would be some data structure that preserved ordering on
     // Stack.min_size.
-    priv stacks: ~[Stack],
+    stacks: Vec<Stack>,
 }
 
 impl StackPool {
     pub fn new() -> StackPool {
         StackPool {
-            stacks: ~[],
+            stacks: vec![],
         }
     }
 
     pub fn take_stack(&mut self, min_size: uint) -> Stack {
         // Ideally this would be a binary search
-        match self.stacks.iter().position(|s| s.min_size < min_size) {
-            Some(idx) => self.stacks.swap_remove(idx),
-            None      => Stack::new(min_size)
+        match self.stacks.iter().position(|s| min_size <= s.min_size) {
+            Some(idx) => self.stacks.swap_remove(idx).unwrap(),
+            None => Stack::new(min_size)
         }
     }
 
@@ -151,8 +153,54 @@ impl StackPool {
     }
 }
 
+fn max_cached_stacks() -> uint {
+    static mut AMT: atomics::AtomicUint = atomics::INIT_ATOMIC_UINT;
+    match unsafe { AMT.load(atomics::SeqCst) } {
+        0 => {}
+        n => return n - 1,
+    }
+    let amt = getenv("RUST_MAX_CACHED_STACKS").and_then(|s| from_str(s.as_slice()));
+    // This default corresponds to 20M of cache per scheduler (at the
+    // default size).
+    let amt = amt.unwrap_or(10);
+    // 0 is our sentinel value, so ensure that we'll never see 0 after
+    // initialization has run
+    unsafe { AMT.store(amt + 1, atomics::SeqCst); }
+    return amt;
+}
+
 extern {
-    fn rust_valgrind_stack_register(start: *libc::uintptr_t,
-                                    end: *libc::uintptr_t) -> libc::c_uint;
+    fn rust_valgrind_stack_register(start: *const libc::uintptr_t,
+                                    end: *const libc::uintptr_t) -> libc::c_uint;
     fn rust_valgrind_stack_deregister(id: libc::c_uint);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StackPool;
+
+    #[test]
+    fn stack_pool_caches() {
+        let mut p = StackPool::new();
+        let s = p.take_stack(10);
+        p.give_stack(s);
+        let s = p.take_stack(4);
+        assert_eq!(s.min_size, 10);
+        p.give_stack(s);
+        let s = p.take_stack(14);
+        assert_eq!(s.min_size, 14);
+        p.give_stack(s);
+    }
+
+    #[test]
+    fn stack_pool_caches_exact() {
+        let mut p = StackPool::new();
+        let mut s = p.take_stack(10);
+        s.valgrind_id = 100;
+        p.give_stack(s);
+
+        let s = p.take_stack(10);
+        assert_eq!(s.min_size, 10);
+        assert_eq!(s.valgrind_id, 100);
+    }
 }

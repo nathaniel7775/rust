@@ -1,6 +1,5 @@
-// xfail-fast
 
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -109,8 +108,8 @@ mod test_foreign_items {
     pub mod rustrt {
         extern {
             #[cfg(bogus)]
-            pub fn write() -> ~str;
-            pub fn write() -> ~str;
+            pub fn write() -> String;
+            pub fn write() -> String;
         }
     }
 }

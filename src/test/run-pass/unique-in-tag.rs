@@ -8,13 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-fn test1() {
-    enum bar { u(~int), w(int), }
+extern crate debug;
 
-    let x = u(~10);
+fn test1() {
+    enum bar { u(Box<int>), w(int), }
+
+    let x = u(box 10);
     assert!(match x {
       u(a) => {
-        error!("{:?}", a);
+        println!("{:?}", a);
         *a
       }
       _ => { 66 }

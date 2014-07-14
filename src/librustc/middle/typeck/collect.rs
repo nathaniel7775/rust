@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -24,18 +24,22 @@ for each item are in fact polytypes.  In "layman's terms", this means
 that they are generic types that may have type parameters (more
 mathematically phrased, they are universally quantified over a set of
 type parameters).  Polytypes are represented by an instance of
-`ty::ty_param_bounds_and_ty`.  This combines the core type along with
-a list of the bounds for each parameter.  Type parameters themselves
-are represented as `ty_param()` instances.
+`ty::Polytype`.  This combines the core type along with a list of the
+bounds for each parameter.  Type parameters themselves are represented
+as `ty_param()` instances.
 
 */
 
 
 use metadata::csearch;
-use middle::ty::{ImplContainer, MethodContainer, TraitContainer, substs};
-use middle::ty::{ty_param_bounds_and_ty};
+use middle::def;
+use middle::lang_items::SizedTraitLangItem;
+use middle::resolve_lifetime;
+use middle::subst;
+use middle::subst::{Substs};
+use middle::ty::{ImplContainer, MethodContainer, TraitContainer};
+use middle::ty::{Polytype};
 use middle::ty;
-use middle::subst::Subst;
 use middle::typeck::astconv::{AstConv, ty_of_arg};
 use middle::typeck::astconv::{ast_ty_to_ty};
 use middle::typeck::astconv;
@@ -44,24 +48,30 @@ use middle::typeck::{CrateCtxt, lookup_def_tcx, no_params, write_ty_to_tcx};
 use util::ppaux;
 use util::ppaux::Repr;
 
-use std::vec;
-use syntax::abi::AbiSet;
-use syntax::ast::{RegionTyParamBound, TraitTyParamBound};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::gc::Gc;
+
+use syntax::abi;
+use syntax::ast::{StaticRegionTyParamBound, OtherRegionTyParamBound};
+use syntax::ast::{TraitTyParamBound, UnboxedFnTyParamBound};
 use syntax::ast;
 use syntax::ast_map;
-use syntax::ast_util::{local_def, split_trait_methods};
+use syntax::ast_util;
+use syntax::ast_util::{local_def, method_ident, split_trait_methods};
 use syntax::codemap::Span;
 use syntax::codemap;
-use syntax::print::pprust::{path_to_str};
-use syntax::visit;
-use syntax::opt_vec::OptVec;
+use syntax::owned_slice::OwnedSlice;
 use syntax::parse::token::special_idents;
+use syntax::parse::token;
+use syntax::print::pprust::{path_to_string};
+use syntax::visit;
 
-struct CollectItemTypesVisitor {
-    ccx: @CrateCtxt
+struct CollectItemTypesVisitor<'a> {
+    ccx: &'a CrateCtxt<'a>
 }
 
-impl visit::Visitor<()> for CollectItemTypesVisitor {
+impl<'a> visit::Visitor<()> for CollectItemTypesVisitor<'a> {
     fn visit_item(&mut self, i: &ast::Item, _: ()) {
         convert(self.ccx, i);
         visit::walk_item(self, i, ());
@@ -72,13 +82,12 @@ impl visit::Visitor<()> for CollectItemTypesVisitor {
     }
 }
 
-pub fn collect_item_types(ccx: @CrateCtxt, crate: &ast::Crate) {
+pub fn collect_item_types(ccx: &CrateCtxt, krate: &ast::Crate) {
     fn collect_intrinsic_type(ccx: &CrateCtxt,
                               lang_item: ast::DefId) {
-        let ty::ty_param_bounds_and_ty { ty: ty, .. } =
+        let ty::Polytype { ty: ty, .. } =
             ccx.get_item_ty(lang_item);
-        let mut intrinsic_defs = ccx.tcx.intrinsic_defs.borrow_mut();
-        intrinsic_defs.get().insert(lang_item, ty);
+        ccx.tcx.intrinsic_defs.borrow_mut().insert(lang_item, ty);
     }
 
     match ccx.tcx.lang_items.ty_desc() {
@@ -89,46 +98,50 @@ pub fn collect_item_types(ccx: @CrateCtxt, crate: &ast::Crate) {
     }
 
     let mut visitor = CollectItemTypesVisitor{ ccx: ccx };
-    visit::walk_crate(&mut visitor, crate, ());
+    visit::walk_crate(&mut visitor, krate, ());
 }
 
 pub trait ToTy {
     fn to_ty<RS:RegionScope>(&self, rs: &RS, ast_ty: &ast::Ty) -> ty::t;
 }
 
-impl ToTy for CrateCtxt {
+impl<'a> ToTy for CrateCtxt<'a> {
     fn to_ty<RS:RegionScope>(&self, rs: &RS, ast_ty: &ast::Ty) -> ty::t {
         ast_ty_to_ty(self, rs, ast_ty)
     }
 }
 
-impl AstConv for CrateCtxt {
-    fn tcx(&self) -> ty::ctxt { self.tcx }
+impl<'a> AstConv for CrateCtxt<'a> {
+    fn tcx<'a>(&'a self) -> &'a ty::ctxt { self.tcx }
 
-    fn get_item_ty(&self, id: ast::DefId) -> ty::ty_param_bounds_and_ty {
-        if id.crate != ast::LOCAL_CRATE {
+    fn get_item_ty(&self, id: ast::DefId) -> ty::Polytype {
+        if id.krate != ast::LOCAL_CRATE {
             return csearch::get_type(self.tcx, id)
         }
 
-        match self.tcx.items.find(id.node) {
-            Some(ast_map::NodeItem(item, _)) => ty_of_item(self, item),
-            Some(ast_map::NodeForeignItem(foreign_item, abis, _, _)) => {
-                ty_of_foreign_item(self, foreign_item, abis)
+        match self.tcx.map.find(id.node) {
+            Some(ast_map::NodeItem(item)) => ty_of_item(self, &*item),
+            Some(ast_map::NodeForeignItem(foreign_item)) => {
+                let abi = self.tcx.map.get_foreign_abi(id.node);
+                ty_of_foreign_item(self, &*foreign_item, abi)
             }
-            ref x => {
-                self.tcx.sess.bug(format!("unexpected sort of item \
-                                           in get_item_ty(): {:?}", (*x)));
+            x => {
+                self.tcx.sess.bug(format!("unexpected sort of node \
+                                           in get_item_ty(): {:?}",
+                                          x).as_slice());
             }
         }
     }
 
-    fn get_trait_def(&self, id: ast::DefId) -> @ty::TraitDef {
+    fn get_trait_def(&self, id: ast::DefId) -> Rc<ty::TraitDef> {
         get_trait_def(self, id)
     }
 
     fn ty_infer(&self, span: Span) -> ty::t {
-        self.tcx.sess.span_bug(span,
-                               "found `ty_infer` in unexpected place");
+        self.tcx.sess.span_err(span, "the type placeholder `_` is not \
+                                      allowed within types on item \
+                                      signatures.");
+        ty::mk_err()
     }
 }
 
@@ -146,8 +159,8 @@ pub fn get_enum_variant_types(ccx: &CrateCtxt,
         let result_ty = match variant.node.kind {
             ast::TupleVariantKind(ref args) if args.len() > 0 => {
                 let rs = ExplicitRscope;
-                let input_tys = args.map(|va| ccx.to_ty(&rs, va.ty));
-                ty::mk_ctor_fn(tcx, scope, input_tys, enum_ty)
+                let input_tys: Vec<_> = args.iter().map(|va| ccx.to_ty(&rs, &*va.ty)).collect();
+                ty::mk_ctor_fn(tcx, scope, input_tys.as_slice(), enum_ty)
             }
 
             ast::TupleVariantKind(_) => {
@@ -155,71 +168,70 @@ pub fn get_enum_variant_types(ccx: &CrateCtxt,
             }
 
             ast::StructVariantKind(struct_def) => {
-                let tpt = ty_param_bounds_and_ty {
-                    generics: ty_generics(ccx, generics, 0),
+                let pty = Polytype {
+                    generics: ty_generics_for_type(ccx, generics),
                     ty: enum_ty
                 };
 
-                convert_struct(ccx, struct_def, tpt, variant.node.id);
+                convert_struct(ccx, &*struct_def, pty, variant.node.id);
 
-                let input_tys = struct_def.fields.map(
-                    |f| ty::node_id_to_type(ccx.tcx, f.node.id));
-                ty::mk_ctor_fn(tcx, scope, input_tys, enum_ty)
+                let input_tys: Vec<_> = struct_def.fields.iter().map(
+                    |f| ty::node_id_to_type(ccx.tcx, f.node.id)).collect();
+                ty::mk_ctor_fn(tcx, scope, input_tys.as_slice(), enum_ty)
             }
         };
 
-        let tpt = ty_param_bounds_and_ty {
-            generics: ty_generics(ccx, generics, 0),
+        let pty = Polytype {
+            generics: ty_generics_for_type(ccx, generics),
             ty: result_ty
         };
 
-        {
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(variant.node.id), tpt);
-        }
+        tcx.tcache.borrow_mut().insert(local_def(variant.node.id), pty);
 
         write_ty_to_tcx(tcx, variant.node.id, result_ty);
     }
 }
 
-pub fn ensure_trait_methods(ccx: &CrateCtxt, trait_id: ast::NodeId) {
+pub fn ensure_trait_methods(ccx: &CrateCtxt,
+                            trait_id: ast::NodeId,
+                            trait_def: &ty::TraitDef) {
     let tcx = ccx.tcx;
-    match tcx.items.get(trait_id) {
-        ast_map::NodeItem(item, _) => {
+    match tcx.map.get(trait_id) {
+        ast_map::NodeItem(item) => {
             match item.node {
-                ast::ItemTrait(ref generics, _, ref ms) => {
-                    let trait_ty_generics = ty_generics(ccx, generics, 0);
-
+                ast::ItemTrait(_, _, _, ref ms) => {
                     // For each method, construct a suitable ty::Method and
                     // store it into the `tcx.methods` table:
                     for m in ms.iter() {
-                        let ty_method = @match m {
+                        let ty_method = Rc::new(match m {
                             &ast::Required(ref m) => {
                                 ty_method_of_trait_method(
-                                    ccx, trait_id, &trait_ty_generics,
+                                    ccx, trait_id, &trait_def.generics,
                                     &m.id, &m.ident, &m.explicit_self,
-                                    &m.generics, &m.purity, m.decl)
+                                    &m.generics, &m.fn_style, &*m.decl)
                             }
 
                             &ast::Provided(ref m) => {
                                 ty_method_of_trait_method(
-                                    ccx, trait_id, &trait_ty_generics,
-                                    &m.id, &m.ident, &m.explicit_self,
-                                    &m.generics, &m.purity, m.decl)
+                                    ccx, trait_id, &trait_def.generics,
+                                    &m.id, &ast_util::method_ident(&**m),
+                                    ast_util::method_explicit_self(&**m),
+                                    ast_util::method_generics(&**m),
+                                    &ast_util::method_fn_style(&**m),
+                                    ast_util::method_fn_decl(&**m))
                             }
-                        };
+                        });
 
                         if ty_method.explicit_self == ast::SelfStatic {
-                            make_static_method_ty(ccx, trait_id, ty_method,
-                                                  &trait_ty_generics);
+                            make_static_method_ty(ccx, &*ty_method);
                         }
 
-                        let mut methods = tcx.methods.borrow_mut();
-                        methods.get().insert(ty_method.def_id, ty_method);
+                        tcx.methods.borrow_mut().insert(ty_method.def_id,
+                                                        ty_method);
                     }
 
                     // Add an entry mapping
-                    let method_def_ids = @ms.map(|m| {
+                    let method_def_ids = Rc::new(ms.iter().map(|m| {
                         match m {
                             &ast::Required(ref ty_method) => {
                                 local_def(ty_method.id)
@@ -228,13 +240,11 @@ pub fn ensure_trait_methods(ccx: &CrateCtxt, trait_id: ast::NodeId) {
                                 local_def(method.id)
                             }
                         }
-                    });
+                    }).collect());
 
                     let trait_def_id = local_def(trait_id);
-                    let mut trait_method_def_ids = tcx.trait_method_def_ids
-                                                      .borrow_mut();
-                    trait_method_def_ids.get().insert(trait_def_id,
-                                                      method_def_ids);
+                    tcx.trait_method_def_ids.borrow_mut()
+                        .insert(trait_def_id, method_def_ids);
                 }
                 _ => {} // Ignore things that aren't traits.
             }
@@ -242,132 +252,12 @@ pub fn ensure_trait_methods(ccx: &CrateCtxt, trait_id: ast::NodeId) {
         _ => { /* Ignore things that aren't traits */ }
     }
 
-    fn make_static_method_ty(ccx: &CrateCtxt,
-                             trait_id: ast::NodeId,
-                             m: &ty::Method,
-                             trait_ty_generics: &ty::Generics) {
-        // If declaration is
-        //
-        //     trait Trait<'a,'b,'c,a,b,c> {
-        //        fn foo<'d,'e,'f,d,e,f>(...) -> Self;
-        //     }
-        //
-        // and we will create a function like
-        //
-        //     fn foo<'a,'b,'c,   // First the lifetime params from trait
-        //            'd,'e,'f,   // Then lifetime params from `foo()`
-        //            a,b,c,      // Then type params from trait
-        //            D:Trait<'a,'b,'c,a,b,c>, // Then this sucker
-        //            E,F,G       // Then type params from `foo()`, offset by 1
-        //           >(...) -> D' {}
-        //
-        // Note that `Self` is replaced with an explicit type
-        // parameter D that is sandwiched in between the trait params
-        // and the method params, and thus the indices of the method
-        // type parameters are offset by 1 (that is, the method
-        // parameters are mapped from d, e, f to E, F, and G).  The
-        // choice of this ordering is somewhat arbitrary.
-        //
-        // Note also that the bound for `D` is `Trait<'a,'b,'c,a,b,c>`.
-        // This implies that the lifetime parameters that were inherited
-        // from the trait (i.e., `'a`, `'b`, and `'c`) all must be early
-        // bound, since they appear in a trait bound.
-        //
-        // Also, this system is rather a hack that should be replaced
-        // with a more uniform treatment of Self (which is partly
-        // underway).
-
-        // build up a subst that shifts all of the parameters over
-        // by one and substitute in a new type param for self
-
-        let tcx = ccx.tcx;
-
-        let dummy_defid = ast::DefId {crate: 0, node: 0};
-
-        // Represents [A',B',C']
-        let num_trait_bounds = trait_ty_generics.type_param_defs.len();
-        let non_shifted_trait_tps = vec::from_fn(num_trait_bounds, |i| {
-            ty::mk_param(tcx, i, trait_ty_generics.type_param_defs[i].def_id)
-        });
-
-        // Represents [D']
-        let self_param = ty::mk_param(tcx, num_trait_bounds,
-                                      dummy_defid);
-
-        // Represents [E',F',G']
-        let num_method_bounds = m.generics.type_param_defs.len();
-        let shifted_method_tps = vec::from_fn(num_method_bounds, |i| {
-            ty::mk_param(tcx, i + num_trait_bounds + 1,
-                         m.generics.type_param_defs[i].def_id)
-        });
-
-        // Convert the regions 'a, 'b, 'c defined on the trait into
-        // bound regions on the fn. Note that because these appear in the
-        // bound for `Self` they must be early bound.
-        let new_early_region_param_defs = trait_ty_generics.region_param_defs;
-        let rps_from_trait =
-            trait_ty_generics.region_param_defs.iter().
-            enumerate().
-            map(|(index,d)| ty::ReEarlyBound(d.def_id.node, index, d.ident)).
-            collect();
-
-        // build up the substitution from
-        //     'a,'b,'c => 'a,'b,'c
-        //     A,B,C => A',B',C'
-        //     Self => D'
-        //     D,E,F => E',F',G'
-        let substs = substs {
-            regions: ty::NonerasedRegions(rps_from_trait),
-            self_ty: Some(self_param),
-            tps: non_shifted_trait_tps + shifted_method_tps
-        };
-
-        // create the type of `foo`, applying the substitution above
-        let ty = ty::subst(tcx,
-                           &substs,
-                           ty::mk_bare_fn(tcx, m.fty.clone()));
-
-        // create the type parameter definitions for `foo`, applying
-        // the substitution to any traits that appear in their bounds.
-
-        // add in the type parameters from the trait
-        let mut new_type_param_defs = ~[];
-        let substd_type_param_defs =
-            trait_ty_generics.type_param_defs.subst(tcx, &substs);
-        new_type_param_defs.push_all(*substd_type_param_defs);
-
-        // add in the "self" type parameter
-        let self_trait_def = get_trait_def(ccx, local_def(trait_id));
-        let self_trait_ref = self_trait_def.trait_ref.subst(tcx, &substs);
-        new_type_param_defs.push(ty::TypeParameterDef {
-            ident: special_idents::self_,
-            def_id: dummy_defid,
-            bounds: @ty::ParamBounds {
-                builtin_bounds: ty::EmptyBuiltinBounds(),
-                trait_bounds: ~[self_trait_ref]
-            },
-            default: None
-        });
-
-        // add in the type parameters from the method
-        let substd_type_param_defs = m.generics.type_param_defs.subst(tcx, &substs);
-        new_type_param_defs.push_all(*substd_type_param_defs);
-
-        debug!("static method {} type_param_defs={} ty={}, substs={}",
-               m.def_id.repr(tcx),
-               new_type_param_defs.repr(tcx),
-               ty.repr(tcx),
-               substs.repr(tcx));
-
-        let mut tcache = tcx.tcache.borrow_mut();
-        tcache.get().insert(m.def_id,
-                          ty_param_bounds_and_ty {
-                              generics: ty::Generics {
-                                  type_param_defs: @new_type_param_defs,
-                                  region_param_defs: new_early_region_param_defs
-                              },
-                              ty: ty
-                          });
+    fn make_static_method_ty(ccx: &CrateCtxt, m: &ty::Method) {
+        ccx.tcx.tcache.borrow_mut().insert(
+            m.def_id,
+            Polytype {
+                generics: m.generics.clone(),
+                ty: ty::mk_bare_fn(ccx.tcx, m.fty.clone()) });
     }
 
     fn ty_method_of_trait_method(this: &CrateCtxt,
@@ -377,17 +267,19 @@ pub fn ensure_trait_methods(ccx: &CrateCtxt, trait_id: ast::NodeId) {
                                  m_ident: &ast::Ident,
                                  m_explicit_self: &ast::ExplicitSelf,
                                  m_generics: &ast::Generics,
-                                 m_purity: &ast::Purity,
+                                 m_fn_style: &ast::FnStyle,
                                  m_decl: &ast::FnDecl) -> ty::Method
     {
-        let trait_self_ty = ty::mk_self(this.tcx, local_def(trait_id));
-        let fty = astconv::ty_of_method(this, *m_id, *m_purity, trait_self_ty,
+        let trait_self_ty = ty::mk_self_type(this.tcx, local_def(trait_id));
+        let fty = astconv::ty_of_method(this, *m_id, *m_fn_style, trait_self_ty,
                                         *m_explicit_self, m_decl);
-        let num_trait_type_params = trait_generics.type_param_defs.len();
+        let ty_generics =
+            ty_generics_for_fn_or_method(this,
+                                         m_generics,
+                                         (*trait_generics).clone());
         ty::Method::new(
             *m_ident,
-            // FIXME(#5121) -- distinguish early vs late lifetime params
-            ty_generics(this, m_generics, num_trait_type_params),
+            ty_generics,
             fty,
             m_explicit_self.node,
             // assume public, because this is only invoked on trait methods
@@ -399,140 +291,106 @@ pub fn ensure_trait_methods(ccx: &CrateCtxt, trait_id: ast::NodeId) {
     }
 }
 
-pub fn ensure_supertraits(ccx: &CrateCtxt,
-                          id: ast::NodeId,
-                          sp: codemap::Span,
-                          ast_trait_refs: &[ast::TraitRef])
-                          -> ty::BuiltinBounds
-{
-    let tcx = ccx.tcx;
+pub fn convert_field(ccx: &CrateCtxt,
+                     struct_generics: &ty::Generics,
+                     v: &ast::StructField,
+                     origin: ast::DefId) -> ty::field_ty {
+    let tt = ccx.to_ty(&ExplicitRscope, &*v.node.ty);
+    write_ty_to_tcx(ccx.tcx, v.node.id, tt);
+    /* add the field to the tcache */
+    ccx.tcx.tcache.borrow_mut().insert(local_def(v.node.id),
+                                       ty::Polytype {
+                                           generics: struct_generics.clone(),
+                                           ty: tt
+                                       });
 
-    // Called only the first time trait_def_of_item is called.
-    // Supertraits are ensured at the same time.
-    {
-        let supertraits = tcx.supertraits.borrow();
-        assert!(!supertraits.get().contains_key(&local_def(id)));
-    }
-
-    let self_ty = ty::mk_self(ccx.tcx, local_def(id));
-    let mut ty_trait_refs: ~[@ty::TraitRef] = ~[];
-    let mut bounds = ty::EmptyBuiltinBounds();
-    for ast_trait_ref in ast_trait_refs.iter() {
-        let trait_def_id = ty::trait_ref_to_def_id(ccx.tcx, ast_trait_ref);
-        // FIXME(#8559): Need to instantiate the trait_ref whether or not it's a
-        // builtin trait, so that the trait's node id appears in the tcx trait_ref
-        // map. This is only needed for metadata; see the similar fixme in encoder.rs.
-        let trait_ref = instantiate_trait_ref(ccx, ast_trait_ref, self_ty);
-        if !ty::try_add_builtin_trait(ccx.tcx, trait_def_id, &mut bounds) {
-
-            // FIXME(#5527) Could have same trait multiple times
-            if ty_trait_refs.iter().any(|other_trait| other_trait.def_id == trait_ref.def_id) {
-                // This means a trait inherited from the same supertrait more
-                // than once.
-                tcx.sess.span_err(sp, "Duplicate supertrait in trait declaration");
-                break;
-            } else {
-                ty_trait_refs.push(trait_ref);
+    match v.node.kind {
+        ast::NamedField(ident, visibility) => {
+            ty::field_ty {
+                name: ident.name,
+                id: local_def(v.node.id),
+                vis: visibility,
+                origin: origin,
+            }
+        }
+        ast::UnnamedField(visibility) => {
+            ty::field_ty {
+                name: special_idents::unnamed_field.name,
+                id: local_def(v.node.id),
+                vis: visibility,
+                origin: origin,
             }
         }
     }
-
-    let mut supertraits = tcx.supertraits.borrow_mut();
-    supertraits.get().insert(local_def(id), @ty_trait_refs);
-    bounds
-}
-
-pub fn convert_field(ccx: &CrateCtxt,
-                     struct_generics: &ty::Generics,
-                     v: &ast::StructField) {
-    let tt = ccx.to_ty(&ExplicitRscope, v.node.ty);
-    write_ty_to_tcx(ccx.tcx, v.node.id, tt);
-    /* add the field to the tcache */
-    let mut tcache = ccx.tcx.tcache.borrow_mut();
-    tcache.get().insert(local_def(v.node.id),
-                          ty::ty_param_bounds_and_ty {
-                              generics: struct_generics.clone(),
-                              ty: tt
-                          });
 }
 
 fn convert_methods(ccx: &CrateCtxt,
                    container: MethodContainer,
-                   ms: &[@ast::Method],
+                   ms: &[Gc<ast::Method>],
                    untransformed_rcvr_ty: ty::t,
                    rcvr_ty_generics: &ty::Generics,
-                   rcvr_ast_generics: &ast::Generics,
                    rcvr_visibility: ast::Visibility)
 {
     let tcx = ccx.tcx;
+    let mut seen_methods = HashSet::new();
     for m in ms.iter() {
-        let num_rcvr_ty_params = rcvr_ty_generics.type_param_defs.len();
-        let m_ty_generics = ty_generics(ccx, &m.generics, num_rcvr_ty_params);
-        let mty = @ty_of_method(ccx,
-                                container,
-                                *m,
-                                untransformed_rcvr_ty,
-                                rcvr_ast_generics,
-                                rcvr_visibility);
+        if !seen_methods.insert(ast_util::method_ident(&**m).repr(tcx)) {
+            tcx.sess.span_err(m.span, "duplicate method in trait impl");
+        }
+
+        let mty = Rc::new(ty_of_method(ccx,
+                                       container,
+                                       &**m,
+                                       untransformed_rcvr_ty,
+                                       rcvr_ty_generics,
+                                       rcvr_visibility));
         let fty = ty::mk_bare_fn(tcx, mty.fty.clone());
         debug!("method {} (id {}) has type {}",
-                m.ident.repr(ccx.tcx),
+                method_ident(&**m).repr(tcx),
                 m.id,
-                fty.repr(ccx.tcx));
-        {
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(
-                local_def(m.id),
-
-                // n.b.: the type of a method is parameterized by both
-                // the parameters on the receiver and those on the method
-                // itself
-                ty_param_bounds_and_ty {
-                    generics: ty::Generics {
-                        type_param_defs: @vec::append(
-                            (*rcvr_ty_generics.type_param_defs).clone(),
-                            *m_ty_generics.type_param_defs),
-                        region_param_defs: rcvr_ty_generics.region_param_defs,
-                    },
-                    ty: fty
-                });
-        }
+                fty.repr(tcx));
+        tcx.tcache.borrow_mut().insert(
+            local_def(m.id),
+            Polytype {
+                generics: mty.generics.clone(),
+                ty: fty
+            });
 
         write_ty_to_tcx(tcx, m.id, fty);
 
-        let mut methods = tcx.methods.borrow_mut();
-        methods.get().insert(mty.def_id, mty);
+        tcx.methods.borrow_mut().insert(mty.def_id, mty);
     }
 
     fn ty_of_method(ccx: &CrateCtxt,
                     container: MethodContainer,
                     m: &ast::Method,
                     untransformed_rcvr_ty: ty::t,
-                    rcvr_generics: &ast::Generics,
-                    rcvr_visibility: ast::Visibility) -> ty::Method
+                    rcvr_ty_generics: &ty::Generics,
+                    rcvr_visibility: ast::Visibility)
+                    -> ty::Method
     {
-        let fty = astconv::ty_of_method(ccx, m.id, m.purity,
+        let fty = astconv::ty_of_method(ccx, m.id, ast_util::method_fn_style(&*m),
                                         untransformed_rcvr_ty,
-                                        m.explicit_self, m.decl);
+                                        *ast_util::method_explicit_self(&*m),
+                                        ast_util::method_fn_decl(&*m));
 
         // if the method specifies a visibility, use that, otherwise
         // inherit the visibility from the impl (so `foo` in `pub impl
         // { fn foo(); }` is public, but private in `priv impl { fn
         // foo(); }`).
-        let method_vis = m.vis.inherit_from(rcvr_visibility);
+        let method_vis = ast_util::method_vis(&*m).inherit_from(rcvr_visibility);
 
-        let num_rcvr_type_params = rcvr_generics.ty_params.len();
-        ty::Method::new(
-            m.ident,
-            // FIXME(#5121) -- distinguish early vs late lifetime params
-            ty_generics(ccx, &m.generics, num_rcvr_type_params),
-            fty,
-            m.explicit_self.node,
-            method_vis,
-            local_def(m.id),
-            container,
-            None
-        )
+        let m_ty_generics =
+            ty_generics_for_fn_or_method(ccx, ast_util::method_generics(&*m),
+                                         (*rcvr_ty_generics).clone());
+        ty::Method::new(ast_util::method_ident(&*m),
+                        m_ty_generics,
+                        fty,
+                        ast_util::method_explicit_self(&*m).node,
+                        method_vis,
+                        local_def(m.id),
+                        container,
+                        None)
     }
 }
 
@@ -545,129 +403,198 @@ pub fn ensure_no_ty_param_bounds(ccx: &CrateCtxt,
             ccx.tcx.sess.span_err(
                 span,
                 format!("trait bounds are not allowed in {} definitions",
-                     thing));
+                        thing).as_slice());
         }
+    }
+}
+
+fn ensure_generics_abi(ccx: &CrateCtxt,
+                       span: Span,
+                       abi: abi::Abi,
+                       generics: &ast::Generics) {
+    if generics.ty_params.len() > 0 &&
+       !(abi == abi::Rust || abi == abi::RustIntrinsic) {
+        ccx.tcx.sess.span_err(span,
+                              "foreign functions may not use type parameters");
     }
 }
 
 pub fn convert(ccx: &CrateCtxt, it: &ast::Item) {
     let tcx = ccx.tcx;
-    debug!("convert: item {} with id {}", tcx.sess.str_of(it.ident), it.id);
+    debug!("convert: item {} with id {}", token::get_ident(it.ident), it.id);
     match it.node {
-      // These don't define types.
-      ast::ItemForeignMod(_) | ast::ItemMod(_) | ast::ItemMac(_) => {}
-      ast::ItemEnum(ref enum_definition, ref generics) => {
-          ensure_no_ty_param_bounds(ccx, it.span, generics, "enumeration");
-          let tpt = ty_of_item(ccx, it);
-          write_ty_to_tcx(tcx, it.id, tpt.ty);
-          get_enum_variant_types(ccx,
-                                 tpt.ty,
-                                 enum_definition.variants,
-                                 generics);
-      }
-      ast::ItemImpl(ref generics, ref opt_trait_ref, selfty, ref ms) => {
-        let i_ty_generics = ty_generics(ccx, generics, 0);
-        let selfty = ccx.to_ty(&ExplicitRscope, selfty);
-        write_ty_to_tcx(tcx, it.id, selfty);
+        // These don't define types.
+        ast::ItemForeignMod(_) | ast::ItemMod(_) | ast::ItemMac(_) => {}
+        ast::ItemEnum(ref enum_definition, ref generics) => {
+            ensure_no_ty_param_bounds(ccx, it.span, generics, "enumeration");
+            let pty = ty_of_item(ccx, it);
+            write_ty_to_tcx(tcx, it.id, pty.ty);
+            get_enum_variant_types(ccx,
+                                   pty.ty,
+                                   enum_definition.variants.as_slice(),
+                                   generics);
+        },
+        ast::ItemImpl(ref generics, ref opt_trait_ref, selfty, ref ms) => {
+            let ty_generics = ty_generics_for_type(ccx, generics);
+            let selfty = ccx.to_ty(&ExplicitRscope, &*selfty);
+            write_ty_to_tcx(tcx, it.id, selfty);
 
-        {
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(it.id),
-                              ty_param_bounds_and_ty {
-                                  generics: i_ty_generics,
-                                  ty: selfty});
-        }
+            tcx.tcache.borrow_mut().insert(local_def(it.id),
+                                Polytype {
+                                    generics: ty_generics.clone(),
+                                    ty: selfty});
 
-        // If there is a trait reference, treat the methods as always public.
-        // This is to work around some incorrect behavior in privacy checking:
-        // when the method belongs to a trait, it should acquire the privacy
-        // from the trait, not the impl. Forcing the visibility to be public
-        // makes things sorta work.
-        let parent_visibility = if opt_trait_ref.is_some() {
-            ast::Public
-        } else {
-            it.vis
-        };
+            // If there is a trait reference, treat the methods as always public.
+            // This is to work around some incorrect behavior in privacy checking:
+            // when the method belongs to a trait, it should acquire the privacy
+            // from the trait, not the impl. Forcing the visibility to be public
+            // makes things sorta work.
+            let parent_visibility = if opt_trait_ref.is_some() {
+                ast::Public
+            } else {
+                it.vis
+            };
 
-        convert_methods(ccx,
-                        ImplContainer(local_def(it.id)),
-                        *ms,
-                        selfty,
-                        &i_ty_generics,
-                        generics,
-                        parent_visibility);
+            convert_methods(ccx,
+                            ImplContainer(local_def(it.id)),
+                            ms.as_slice(),
+                            selfty,
+                            &ty_generics,
+                            parent_visibility);
 
-        for trait_ref in opt_trait_ref.iter() {
-            let trait_ref = instantiate_trait_ref(ccx, trait_ref, selfty);
-
-            // Prevent the builtin kind traits from being manually implemented.
-            if tcx.lang_items.to_builtin_kind(trait_ref.def_id).is_some() {
-                tcx.sess.span_err(it.span,
-                    "cannot provide an explicit implementation \
-                     for a builtin kind");
+            for trait_ref in opt_trait_ref.iter() {
+                instantiate_trait_ref(ccx, trait_ref, selfty);
             }
-        }
-      }
-      ast::ItemTrait(ref generics, _, ref trait_methods) => {
-          let trait_def = trait_def_of_item(ccx, it);
+        },
+        ast::ItemTrait(_, _, _, ref trait_methods) => {
+            let trait_def = trait_def_of_item(ccx, it);
 
-          // Run convert_methods on the provided methods.
-          let (_, provided_methods) =
-              split_trait_methods(*trait_methods);
-          let untransformed_rcvr_ty = ty::mk_self(tcx, local_def(it.id));
-          convert_methods(ccx,
-                          TraitContainer(local_def(it.id)),
-                          provided_methods,
-                          untransformed_rcvr_ty,
-                          &trait_def.generics,
-                          generics,
-                          it.vis);
+            // Run convert_methods on the provided methods.
+            let (_, provided_methods) =
+                split_trait_methods(trait_methods.as_slice());
+            let untransformed_rcvr_ty = ty::mk_self_type(tcx, local_def(it.id));
+            convert_methods(ccx,
+                            TraitContainer(local_def(it.id)),
+                            provided_methods.as_slice(),
+                            untransformed_rcvr_ty,
+                            &trait_def.generics,
+                            it.vis);
 
-          // We need to do this *after* converting methods, since
-          // convert_methods produces a tcache entry that is wrong for
-          // static trait methods. This is somewhat unfortunate.
-          ensure_trait_methods(ccx, it.id);
-      }
-      ast::ItemStruct(struct_def, ref generics) => {
-        ensure_no_ty_param_bounds(ccx, it.span, generics, "structure");
+            // We need to do this *after* converting methods, since
+            // convert_methods produces a tcache entry that is wrong for
+            // static trait methods. This is somewhat unfortunate.
+            ensure_trait_methods(ccx, it.id, &*trait_def);
+        },
+        ast::ItemStruct(struct_def, ref generics) => {
+            ensure_no_ty_param_bounds(ccx, it.span, generics, "structure");
 
-        // Write the class type
-        let tpt = ty_of_item(ccx, it);
-        write_ty_to_tcx(tcx, it.id, tpt.ty);
+            // Write the class type.
+            let pty = ty_of_item(ccx, it);
+            write_ty_to_tcx(tcx, it.id, pty.ty);
 
-        {
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(it.id), tpt);
-        }
+            tcx.tcache.borrow_mut().insert(local_def(it.id), pty.clone());
 
-        convert_struct(ccx, struct_def, tpt, it.id);
-      }
-      ast::ItemTy(_, ref generics) => {
-        ensure_no_ty_param_bounds(ccx, it.span, generics, "type");
-        let tpt = ty_of_item(ccx, it);
-        write_ty_to_tcx(tcx, it.id, tpt.ty);
-      }
-      _ => {
-        // This call populates the type cache with the converted type
-        // of the item in passing. All we have to do here is to write
-        // it into the node type table.
-        let tpt = ty_of_item(ccx, it);
-        write_ty_to_tcx(tcx, it.id, tpt.ty);
-      }
+            // Write the super-struct type, if it exists.
+            match struct_def.super_struct {
+                Some(ty) => {
+                    let supserty = ccx.to_ty(&ExplicitRscope, &*ty);
+                    write_ty_to_tcx(tcx, it.id, supserty);
+                },
+                _ => {},
+            }
+
+            convert_struct(ccx, &*struct_def, pty, it.id);
+        },
+        ast::ItemTy(_, ref generics) => {
+            ensure_no_ty_param_bounds(ccx, it.span, generics, "type");
+            let pty = ty_of_item(ccx, it);
+            write_ty_to_tcx(tcx, it.id, pty.ty);
+        },
+        ast::ItemFn(_, _, abi, ref generics, _) => {
+            ensure_generics_abi(ccx, it.span, abi, generics);
+            let pty = ty_of_item(ccx, it);
+            write_ty_to_tcx(tcx, it.id, pty.ty);
+        },
+        _ => {
+            // This call populates the type cache with the converted type
+            // of the item in passing. All we have to do here is to write
+            // it into the node type table.
+            let pty = ty_of_item(ccx, it);
+            write_ty_to_tcx(tcx, it.id, pty.ty);
+        },
     }
 }
 
 pub fn convert_struct(ccx: &CrateCtxt,
                       struct_def: &ast::StructDef,
-                      tpt: ty::ty_param_bounds_and_ty,
+                      pty: ty::Polytype,
                       id: ast::NodeId) {
     let tcx = ccx.tcx;
 
-    // Write the type of each of the members
-    for f in struct_def.fields.iter() {
-       convert_field(ccx, &tpt.generics, f);
-    }
-    let substs = mk_item_substs(ccx, &tpt.generics, None);
+    // Write the type of each of the members and check for duplicate fields.
+    let mut seen_fields: HashMap<ast::Name, Span> = HashMap::new();
+    let field_tys = struct_def.fields.iter().map(|f| {
+        let result = convert_field(ccx, &pty.generics, f, local_def(id));
+
+        if result.name != special_idents::unnamed_field.name {
+            let dup = match seen_fields.find(&result.name) {
+                Some(prev_span) => {
+                    tcx.sess.span_err(
+                        f.span,
+                        format!("field `{}` is already declared",
+                                token::get_name(result.name)).as_slice());
+                    tcx.sess.span_note(*prev_span,
+                                       "previously declared here");
+                    true
+                },
+                None => false,
+            };
+            // FIXME(#6393) this whole dup thing is just to satisfy
+            // the borrow checker :-(
+            if !dup {
+                seen_fields.insert(result.name, f.span);
+            }
+        }
+
+        result
+    }).collect();
+
+    tcx.struct_fields.borrow_mut().insert(local_def(id), Rc::new(field_tys));
+
+    let super_struct = match struct_def.super_struct {
+        Some(t) => match t.node {
+            ast::TyPath(_, _, path_id) => {
+                let def_map = tcx.def_map.borrow();
+                match def_map.find(&path_id) {
+                    Some(&def::DefStruct(def_id)) => {
+                        // FIXME(#12511) Check for cycles in the inheritance hierarchy.
+                        // Check super-struct is virtual.
+                        match tcx.map.find(def_id.node) {
+                            Some(ast_map::NodeItem(i)) => match i.node {
+                                ast::ItemStruct(struct_def, _) => {
+                                    if !struct_def.is_virtual {
+                                        tcx.sess.span_err(t.span,
+                                            "struct inheritance is only \
+                                             allowed from virtual structs");
+                                    }
+                                },
+                                _ => {},
+                            },
+                            _ => {},
+                        }
+
+                        Some(def_id)
+                    },
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        None => None,
+    };
+    tcx.superstructs.borrow_mut().insert(local_def(id), super_struct);
+
+    let substs = mk_item_substs(ccx, &pty.generics);
     let selfty = ty::mk_struct(tcx, local_def(id), substs);
 
     // If this struct is enum-like or tuple-like, create the type of its
@@ -679,28 +606,22 @@ pub fn convert_struct(ccx: &CrateCtxt,
                 // Enum-like.
                 write_ty_to_tcx(tcx, ctor_id, selfty);
 
-                {
-                    let mut tcache = tcx.tcache.borrow_mut();
-                    tcache.get().insert(local_def(ctor_id), tpt);
-                }
-            } else if struct_def.fields[0].node.kind == ast::UnnamedField {
+                tcx.tcache.borrow_mut().insert(local_def(ctor_id), pty);
+            } else if struct_def.fields.get(0).node.kind.is_unnamed() {
                 // Tuple-like.
-                let inputs = {
-                    let tcache = tcx.tcache.borrow();
-                    struct_def.fields.map(
-                        |field| tcache.get().get(
-                            &local_def(field.node.id)).ty)
-                };
-                let ctor_fn_ty = ty::mk_ctor_fn(tcx, ctor_id, inputs, selfty);
+                let inputs: Vec<_> = struct_def.fields.iter().map(
+                        |field| tcx.tcache.borrow().get(
+                            &local_def(field.node.id)).ty).collect();
+                let ctor_fn_ty = ty::mk_ctor_fn(tcx,
+                                                ctor_id,
+                                                inputs.as_slice(),
+                                                selfty);
                 write_ty_to_tcx(tcx, ctor_id, ctor_fn_ty);
-                {
-                    let mut tcache = tcx.tcache.borrow_mut();
-                    tcache.get().insert(local_def(ctor_id),
-                                      ty_param_bounds_and_ty {
-                        generics: tpt.generics,
-                        ty: ctor_fn_ty
-                    });
-                }
+                tcx.tcache.borrow_mut().insert(local_def(ctor_id),
+                                  Polytype {
+                    generics: pty.generics,
+                    ty: ctor_fn_ty
+                });
             }
         }
     }
@@ -715,195 +636,260 @@ pub fn convert_foreign(ccx: &CrateCtxt, i: &ast::ForeignItem) {
     // map, and I regard each time that I use it as a personal and
     // moral failing, but at the moment it seems like the only
     // convenient way to extract the ABI. - ndm
-    let abis = match ccx.tcx.items.find(i.id) {
-        Some(ast_map::NodeForeignItem(_, abis, _, _)) => abis,
-        ref x => {
-            ccx.tcx.sess.bug(format!("unexpected sort of item \
-                                   in get_item_ty(): {:?}", (*x)));
-        }
-    };
+    let abi = ccx.tcx.map.get_foreign_abi(i.id);
 
-    let tpt = ty_of_foreign_item(ccx, i, abis);
-    write_ty_to_tcx(ccx.tcx, i.id, tpt.ty);
+    let pty = ty_of_foreign_item(ccx, i, abi);
+    write_ty_to_tcx(ccx.tcx, i.id, pty.ty);
 
-    let mut tcache = ccx.tcx.tcache.borrow_mut();
-    tcache.get().insert(local_def(i.id), tpt);
+    ccx.tcx.tcache.borrow_mut().insert(local_def(i.id), pty);
 }
 
 pub fn instantiate_trait_ref(ccx: &CrateCtxt,
                              ast_trait_ref: &ast::TraitRef,
-                             self_ty: ty::t) -> @ty::TraitRef
-{
+                             self_ty: ty::t) -> Rc<ty::TraitRef> {
     /*!
      * Instantiates the path for the given trait reference, assuming that
      * it's bound to a valid trait type. Returns the def_id for the defining
-     * trait. Fails if the type is a type other than an trait type.
+     * trait. Fails if the type is a type other than a trait type.
      */
 
     // FIXME(#5121) -- distinguish early vs late lifetime params
     let rscope = ExplicitRscope;
 
     match lookup_def_tcx(ccx.tcx, ast_trait_ref.path.span, ast_trait_ref.ref_id) {
-        ast::DefTrait(trait_did) => {
+        def::DefTrait(trait_did) => {
             let trait_ref =
                 astconv::ast_path_to_trait_ref(
                     ccx, &rscope, trait_did, Some(self_ty), &ast_trait_ref.path);
 
-            let mut trait_refs = ccx.tcx.trait_refs.borrow_mut();
-            trait_refs.get().insert(ast_trait_ref.ref_id, trait_ref);
-            return trait_ref;
+            ccx.tcx.trait_refs.borrow_mut().insert(ast_trait_ref.ref_id,
+                                                   trait_ref.clone());
+            trait_ref
         }
         _ => {
             ccx.tcx.sess.span_fatal(
                 ast_trait_ref.path.span,
-                format!("{} is not a trait",
-                    path_to_str(&ast_trait_ref.path,
-                                ccx.tcx.sess.intr())));
+                format!("`{}` is not a trait",
+                        path_to_string(&ast_trait_ref.path)).as_slice());
         }
     }
 }
 
-fn get_trait_def(ccx: &CrateCtxt, trait_id: ast::DefId) -> @ty::TraitDef {
-    if trait_id.crate != ast::LOCAL_CRATE {
+fn get_trait_def(ccx: &CrateCtxt, trait_id: ast::DefId) -> Rc<ty::TraitDef> {
+    if trait_id.krate != ast::LOCAL_CRATE {
         return ty::lookup_trait_def(ccx.tcx, trait_id)
     }
 
-    match ccx.tcx.items.get(trait_id.node) {
-        ast_map::NodeItem(item, _) => trait_def_of_item(ccx, item),
-        _ => ccx.tcx.sess.bug(format!("get_trait_def({}): not an item",
-                                   trait_id.node))
+    match ccx.tcx.map.get(trait_id.node) {
+        ast_map::NodeItem(item) => trait_def_of_item(ccx, &*item),
+        _ => {
+            ccx.tcx.sess.bug(format!("get_trait_def({}): not an item",
+                                     trait_id.node).as_slice())
+        }
     }
 }
 
-pub fn trait_def_of_item(ccx: &CrateCtxt, it: &ast::Item) -> @ty::TraitDef {
+pub fn trait_def_of_item(ccx: &CrateCtxt, it: &ast::Item) -> Rc<ty::TraitDef> {
     let def_id = local_def(it.id);
     let tcx = ccx.tcx;
-    {
-        let trait_defs = tcx.trait_defs.borrow();
-        match trait_defs.get().find(&def_id) {
-          Some(&def) => return def,
-          _ => {}
-        }
+    match tcx.trait_defs.borrow().find(&def_id) {
+        Some(def) => return def.clone(),
+        _ => {}
     }
 
-    match it.node {
-        ast::ItemTrait(ref generics, ref supertraits, _) => {
-            let self_ty = ty::mk_self(tcx, def_id);
-            let ty_generics = ty_generics(ccx, generics, 0);
-            let substs = mk_item_substs(ccx, &ty_generics, Some(self_ty));
-            let bounds = ensure_supertraits(ccx, it.id, it.span, *supertraits);
-            let trait_ref = @ty::TraitRef {def_id: def_id,
-                                           substs: substs};
-            let trait_def = @ty::TraitDef {generics: ty_generics,
-                                           bounds: bounds,
-                                           trait_ref: trait_ref};
-            let mut trait_defs = tcx.trait_defs.borrow_mut();
-            trait_defs.get().insert(def_id, trait_def);
-            return trait_def;
+    let (generics, unbound, supertraits) = match it.node {
+        ast::ItemTrait(ref generics, ref unbound, ref supertraits, _) => {
+            (generics, unbound, supertraits)
         }
         ref s => {
             tcx.sess.span_bug(
                 it.span,
-                format!("trait_def_of_item invoked on {:?}", s));
+                format!("trait_def_of_item invoked on {:?}", s).as_slice());
         }
+    };
+
+    let substs = mk_trait_substs(ccx, it.id, generics);
+
+    let ty_generics = ty_generics_for_trait(ccx,
+                                            it.id,
+                                            &substs,
+                                            generics);
+
+    let builtin_bounds =
+        ensure_supertraits(ccx, it.id, it.span, supertraits, unbound);
+
+    let substs = mk_item_substs(ccx, &ty_generics);
+    let trait_def = Rc::new(ty::TraitDef {
+        generics: ty_generics,
+        bounds: builtin_bounds,
+        trait_ref: Rc::new(ty::TraitRef {
+            def_id: def_id,
+            substs: substs
+        })
+    });
+    tcx.trait_defs.borrow_mut().insert(def_id, trait_def.clone());
+
+    return trait_def;
+
+    fn mk_trait_substs(ccx: &CrateCtxt,
+                       trait_id: ast::NodeId,
+                       generics: &ast::Generics)
+                        -> subst::Substs
+    {
+        // Creates a no-op substitution for the trait's type parameters.
+        let regions =
+            generics.lifetimes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, def)| ty::ReEarlyBound(def.id,
+                                                     subst::TypeSpace,
+                                                     i, def.name))
+                    .collect();
+
+        let types =
+            generics.ty_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, def)| ty::mk_param(ccx.tcx, subst::TypeSpace,
+                                                 i, local_def(def.id)))
+                    .collect();
+
+        let self_ty =
+            ty::mk_param(ccx.tcx, subst::SelfSpace, 0, local_def(trait_id));
+
+        subst::Substs::new_trait(types, regions, self_ty)
+    }
+
+    fn ensure_supertraits(ccx: &CrateCtxt,
+                          id: ast::NodeId,
+                          sp: codemap::Span,
+                          ast_trait_refs: &Vec<ast::TraitRef>,
+                          unbound: &Option<ast::TyParamBound>)
+                          -> ty::BuiltinBounds
+    {
+        let tcx = ccx.tcx;
+
+        // Called only the first time trait_def_of_item is called.
+        // Supertraits are ensured at the same time.
+        assert!(!tcx.supertraits.borrow().contains_key(&local_def(id)));
+
+        let self_ty = ty::mk_self_type(ccx.tcx, local_def(id));
+        let mut ty_trait_refs: Vec<Rc<ty::TraitRef>> = Vec::new();
+        let mut bounds = ty::empty_builtin_bounds();
+        for ast_trait_ref in ast_trait_refs.iter() {
+            let trait_def_id = ty::trait_ref_to_def_id(ccx.tcx, ast_trait_ref);
+
+            // FIXME(#8559): Need to instantiate the trait_ref whether
+            // or not it's a builtin trait, so that the trait's node
+            // id appears in the tcx trait_ref map. This is only
+            // needed for metadata; see the similar fixme in
+            // encoder.rs.
+
+            let trait_ref = instantiate_trait_ref(ccx, ast_trait_ref, self_ty);
+            if !ty::try_add_builtin_trait(ccx.tcx, trait_def_id, &mut bounds) {
+
+                // FIXME(#5527) Could have same trait multiple times
+                if ty_trait_refs.iter().any(
+                    |other_trait| other_trait.def_id == trait_ref.def_id)
+                {
+                    // This means a trait inherited from the same
+                    // supertrait more than once.
+                    tcx.sess.span_err(sp, "duplicate supertrait in \
+                                           trait declaration");
+                    break;
+                } else {
+                    ty_trait_refs.push(trait_ref);
+                }
+            }
+        }
+
+        add_unsized_bound(ccx, unbound, &mut bounds, "trait", sp);
+        tcx.supertraits.borrow_mut().insert(local_def(id),
+                                            Rc::new(ty_trait_refs));
+        bounds
     }
 }
 
 pub fn ty_of_item(ccx: &CrateCtxt, it: &ast::Item)
-                  -> ty::ty_param_bounds_and_ty {
+                  -> ty::Polytype {
     let def_id = local_def(it.id);
     let tcx = ccx.tcx;
-    {
-        let tcache = tcx.tcache.borrow();
-        match tcache.get().find(&def_id) {
-            Some(&tpt) => return tpt,
-            _ => {}
-        }
+    match tcx.tcache.borrow().find(&def_id) {
+        Some(pty) => return pty.clone(),
+        _ => {}
     }
     match it.node {
         ast::ItemStatic(t, _, _) => {
-            let typ = ccx.to_ty(&ExplicitRscope, t);
-            let tpt = no_params(typ);
+            let typ = ccx.to_ty(&ExplicitRscope, &*t);
+            let pty = no_params(typ);
 
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(it.id), tpt);
-            return tpt;
+            tcx.tcache.borrow_mut().insert(local_def(it.id), pty.clone());
+            return pty;
         }
-        ast::ItemFn(decl, purity, abi, ref generics, _) => {
-            let ty_generics = ty_generics(ccx, generics, 0);
+        ast::ItemFn(decl, fn_style, abi, ref generics, _) => {
+            let ty_generics = ty_generics_for_fn_or_method(ccx, generics,
+                                                           ty::Generics::empty());
             let tofd = astconv::ty_of_bare_fn(ccx,
                                               it.id,
-                                              purity,
+                                              fn_style,
                                               abi,
-                                              decl);
-            let tpt = ty_param_bounds_and_ty {
-                generics: ty::Generics {
-                    type_param_defs: ty_generics.type_param_defs,
-                    region_param_defs: @[],
-                },
+                                              &*decl);
+            let pty = Polytype {
+                generics: ty_generics,
                 ty: ty::mk_bare_fn(ccx.tcx, tofd)
             };
             debug!("type of {} (id {}) is {}",
-                    tcx.sess.str_of(it.ident),
+                    token::get_ident(it.ident),
                     it.id,
-                    ppaux::ty_to_str(tcx, tpt.ty));
+                    ppaux::ty_to_string(tcx, pty.ty));
 
-            let mut tcache = ccx.tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(it.id), tpt);
-            return tpt;
+            ccx.tcx.tcache.borrow_mut().insert(local_def(it.id), pty.clone());
+            return pty;
         }
         ast::ItemTy(t, ref generics) => {
-            {
-                let mut tcache = tcx.tcache.borrow_mut();
-                match tcache.get().find(&local_def(it.id)) {
-                    Some(&tpt) => return tpt,
-                    None => { }
-                }
+            match tcx.tcache.borrow_mut().find(&local_def(it.id)) {
+                Some(pty) => return pty.clone(),
+                None => { }
             }
 
-            let tpt = {
-                let ty = ccx.to_ty(&ExplicitRscope, t);
-                ty_param_bounds_and_ty {
-                    generics: ty_generics(ccx, generics, 0),
+            let pty = {
+                let ty = ccx.to_ty(&ExplicitRscope, &*t);
+                Polytype {
+                    generics: ty_generics_for_type(ccx, generics),
                     ty: ty
                 }
             };
 
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(it.id), tpt);
-            return tpt;
+            tcx.tcache.borrow_mut().insert(local_def(it.id), pty.clone());
+            return pty;
         }
         ast::ItemEnum(_, ref generics) => {
             // Create a new generic polytype.
-            let ty_generics = ty_generics(ccx, generics, 0);
-            let substs = mk_item_substs(ccx, &ty_generics, None);
+            let ty_generics = ty_generics_for_type(ccx, generics);
+            let substs = mk_item_substs(ccx, &ty_generics);
             let t = ty::mk_enum(tcx, local_def(it.id), substs);
-            let tpt = ty_param_bounds_and_ty {
+            let pty = Polytype {
                 generics: ty_generics,
                 ty: t
             };
 
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(it.id), tpt);
-            return tpt;
+            tcx.tcache.borrow_mut().insert(local_def(it.id), pty.clone());
+            return pty;
         }
         ast::ItemTrait(..) => {
-            tcx.sess.span_bug(
-                it.span,
-                format!("Invoked ty_of_item on trait"));
+            tcx.sess.span_bug(it.span, "invoked ty_of_item on trait");
         }
         ast::ItemStruct(_, ref generics) => {
-            let ty_generics = ty_generics(ccx, generics, 0);
-            let substs = mk_item_substs(ccx, &ty_generics, None);
+            let ty_generics = ty_generics_for_type(ccx, generics);
+            let substs = mk_item_substs(ccx, &ty_generics);
             let t = ty::mk_struct(tcx, local_def(it.id), substs);
-            let tpt = ty_param_bounds_and_ty {
+            let pty = Polytype {
                 generics: ty_generics,
                 ty: t
             };
 
-            let mut tcache = tcx.tcache.borrow_mut();
-            tcache.get().insert(local_def(it.id), tpt);
-            return tpt;
+            tcx.tcache.borrow_mut().insert(local_def(it.id), pty.clone());
+            return pty;
         }
         ast::ItemImpl(..) | ast::ItemMod(_) |
         ast::ItemForeignMod(_) | ast::ItemMac(_) => fail!(),
@@ -912,104 +898,288 @@ pub fn ty_of_item(ccx: &CrateCtxt, it: &ast::Item)
 
 pub fn ty_of_foreign_item(ccx: &CrateCtxt,
                           it: &ast::ForeignItem,
-                          abis: AbiSet) -> ty::ty_param_bounds_and_ty
+                          abi: abi::Abi) -> ty::Polytype
 {
     match it.node {
         ast::ForeignItemFn(fn_decl, ref generics) => {
             ty_of_foreign_fn_decl(ccx,
-                                  fn_decl,
+                                  &*fn_decl,
                                   local_def(it.id),
                                   generics,
-                                  abis)
+                                  abi)
         }
         ast::ForeignItemStatic(t, _) => {
-            ty::ty_param_bounds_and_ty {
-                generics: ty::Generics {
-                    type_param_defs: @~[],
-                    region_param_defs: @[],
-                },
-                ty: ast_ty_to_ty(ccx, &ExplicitRscope, t)
+            ty::Polytype {
+                generics: ty::Generics::empty(),
+                ty: ast_ty_to_ty(ccx, &ExplicitRscope, &*t)
             }
         }
     }
 }
 
-pub fn ty_generics(ccx: &CrateCtxt,
-                   generics: &ast::Generics,
-                   base_index: uint) -> ty::Generics {
-    return ty::Generics {
-        region_param_defs: generics.lifetimes.iter().map(|l| {
-                ty::RegionParameterDef { ident: l.ident,
-                                         def_id: local_def(l.id) }
-            }).collect(),
-        type_param_defs: @generics.ty_params.mapi_to_vec(|offset, param| {
-            let existing_def_opt = {
-                let ty_param_defs = ccx.tcx.ty_param_defs.borrow();
-                ty_param_defs.get().find(&param.id).map(|def| *def)
-            };
-            match existing_def_opt {
-                Some(def) => def,
-                None => {
-                    let param_ty = ty::param_ty {idx: base_index + offset,
-                                                 def_id: local_def(param.id)};
-                    let bounds = @compute_bounds(ccx, param_ty, &param.bounds);
-                    let default = param.default.map(|x| ast_ty_to_ty(ccx, &ExplicitRscope, x));
-                    let def = ty::TypeParameterDef {
-                        ident: param.ident,
-                        def_id: local_def(param.id),
-                        bounds: bounds,
-                        default: default
-                    };
-                    debug!("def for param: {}", def.repr(ccx.tcx));
+fn ty_generics_for_type(ccx: &CrateCtxt,
+                        generics: &ast::Generics)
+                        -> ty::Generics
+{
+    ty_generics(ccx, subst::TypeSpace, &generics.lifetimes,
+                &generics.ty_params, ty::Generics::empty())
+}
 
-                    let mut ty_param_defs = ccx.tcx
-                                               .ty_param_defs
-                                               .borrow_mut();
-                    ty_param_defs.get().insert(param.id, def);
-                    def
-                }
-            }
-        })
+fn ty_generics_for_trait(ccx: &CrateCtxt,
+                         trait_id: ast::NodeId,
+                         substs: &subst::Substs,
+                         generics: &ast::Generics)
+                         -> ty::Generics
+{
+    let mut generics = ty_generics(ccx, subst::TypeSpace, &generics.lifetimes,
+                                   &generics.ty_params, ty::Generics::empty());
+
+    // Something of a hack: use the node id for the trait, also as
+    // the node id for the Self type parameter.
+    let param_id = trait_id;
+
+    let self_trait_ref =
+        Rc::new(ty::TraitRef { def_id: local_def(trait_id),
+                               substs: (*substs).clone() });
+
+    let def = ty::TypeParameterDef {
+        space: subst::SelfSpace,
+        index: 0,
+        ident: special_idents::type_self,
+        def_id: local_def(param_id),
+        bounds: Rc::new(ty::ParamBounds {
+            builtin_bounds: ty::empty_builtin_bounds(),
+            trait_bounds: vec!(self_trait_ref),
+        }),
+        default: None
     };
+
+    ccx.tcx.ty_param_defs.borrow_mut().insert(param_id, def.clone());
+
+    generics.types.push(subst::SelfSpace, def);
+
+    generics
+}
+
+fn ty_generics_for_fn_or_method(ccx: &CrateCtxt,
+                                generics: &ast::Generics,
+                                base_generics: ty::Generics)
+                                -> ty::Generics
+{
+    let early_lifetimes = resolve_lifetime::early_bound_lifetimes(generics);
+    ty_generics(ccx, subst::FnSpace, &early_lifetimes,
+                &generics.ty_params, base_generics)
+}
+
+// Add the Sized bound, unless the type parameter is marked as `Sized?`.
+fn add_unsized_bound(ccx: &CrateCtxt,
+                     unbound: &Option<ast::TyParamBound>,
+                     bounds: &mut ty::BuiltinBounds,
+                     desc: &str,
+                     span: Span) {
+    let kind_id = ccx.tcx.lang_items.require(SizedTraitLangItem);
+    match unbound {
+        &Some(TraitTyParamBound(ref tpb)) => {
+            // #FIXME(8559) currently requires the unbound to be built-in.
+            let trait_def_id = ty::trait_ref_to_def_id(ccx.tcx, tpb);
+            match kind_id {
+                Ok(kind_id) if trait_def_id != kind_id => {
+                    ccx.tcx.sess.span_warn(span,
+                                           format!("default bound relaxed \
+                                                    for a {}, but this does \
+                                                    nothing because the given \
+                                                    bound is not a default. \
+                                                    Only `Sized?` is supported.",
+                                                   desc).as_slice());
+                    ty::try_add_builtin_trait(ccx.tcx,
+                                              kind_id,
+                                              bounds);
+                }
+                _ => {}
+            }
+        }
+        _ if kind_id.is_ok() => {
+            ty::try_add_builtin_trait(ccx.tcx,
+                                      kind_id.unwrap(),
+                                      bounds);
+        }
+        // No lang item for Sized, so we can't add it as a bound.
+        _ => {}
+    }
+}
+
+fn ty_generics(ccx: &CrateCtxt,
+               space: subst::ParamSpace,
+               lifetimes: &Vec<ast::Lifetime>,
+               types: &OwnedSlice<ast::TyParam>,
+               base_generics: ty::Generics)
+               -> ty::Generics
+{
+    let mut result = base_generics;
+
+    for (i, l) in lifetimes.iter().enumerate() {
+        result.regions.push(space,
+                            ty::RegionParameterDef { name: l.name,
+                                                     space: space,
+                                                     index: i,
+                                                     def_id: local_def(l.id) });
+    }
+
+    for (i, param) in types.iter().enumerate() {
+        let def = get_or_create_type_parameter_def(ccx, space, param, i);
+        debug!("def for param: {}", def.repr(ccx.tcx));
+        result.types.push(space, def);
+    }
+
+    return result;
+
+    fn get_or_create_type_parameter_def(ccx: &CrateCtxt,
+                                        space: subst::ParamSpace,
+                                        param: &ast::TyParam,
+                                        index: uint)
+                                        -> ty::TypeParameterDef
+    {
+        match ccx.tcx.ty_param_defs.borrow().find(&param.id) {
+            Some(d) => { return (*d).clone(); }
+            None => { }
+        }
+
+        let param_ty = ty::ParamTy {space: space,
+                                    idx: index,
+                                    def_id: local_def(param.id)};
+        let bounds = Rc::new(compute_bounds(ccx,
+                                            param_ty,
+                                            &param.bounds,
+                                            &param.unbound,
+                                            param.ident,
+                                            param.span));
+        let default = param.default.map(|path| {
+            let ty = ast_ty_to_ty(ccx, &ExplicitRscope, &*path);
+            let cur_idx = param_ty.idx;
+
+            ty::walk_ty(ty, |t| {
+                match ty::get(t).sty {
+                    ty::ty_param(p) => if p.idx > cur_idx {
+                        ccx.tcx.sess.span_err(
+                            path.span,
+                            "type parameters with a default cannot use \
+                             forward declared identifiers")
+                    },
+                    _ => {}
+                }
+            });
+
+            ty
+        });
+
+        let def = ty::TypeParameterDef {
+            space: space,
+            index: index,
+            ident: param.ident,
+            def_id: local_def(param.id),
+            bounds: bounds,
+            default: default
+        };
+
+        ccx.tcx.ty_param_defs.borrow_mut().insert(param.id, def.clone());
+
+        def
+    }
 
     fn compute_bounds(
         ccx: &CrateCtxt,
-        param_ty: ty::param_ty,
-        ast_bounds: &OptVec<ast::TyParamBound>) -> ty::ParamBounds
+        param_ty: ty::ParamTy,
+        ast_bounds: &OwnedSlice<ast::TyParamBound>,
+        unbound: &Option<ast::TyParamBound>,
+        ident: ast::Ident,
+        span: Span) -> ty::ParamBounds
     {
         /*!
          * Translate the AST's notion of ty param bounds (which are an
          * enum consisting of a newtyped Ty or a region) to ty's
          * notion of ty param bounds, which can either be user-defined
-         * traits, or one of the two built-in traits (formerly known
-         * as kinds): Freeze and Send.
+         * traits, or the built-in trait (formerly known as kind): Send.
          */
 
         let mut param_bounds = ty::ParamBounds {
-            builtin_bounds: ty::EmptyBuiltinBounds(),
-            trait_bounds: ~[]
+            builtin_bounds: ty::empty_builtin_bounds(),
+            trait_bounds: Vec::new()
         };
         for ast_bound in ast_bounds.iter() {
             match *ast_bound {
                 TraitTyParamBound(ref b) => {
-                    let ty = ty::mk_param(ccx.tcx, param_ty.idx, param_ty.def_id);
+                    let ty = ty::mk_param(ccx.tcx, param_ty.space,
+                                          param_ty.idx, param_ty.def_id);
                     let trait_ref = instantiate_trait_ref(ccx, b, ty);
                     if !ty::try_add_builtin_trait(
-                        ccx.tcx, trait_ref.def_id,
-                        &mut param_bounds.builtin_bounds)
-                    {
+                            ccx.tcx, trait_ref.def_id,
+                            &mut param_bounds.builtin_bounds) {
                         // Must be a user-defined trait
                         param_bounds.trait_bounds.push(trait_ref);
                     }
                 }
 
-                RegionTyParamBound => {
+                StaticRegionTyParamBound => {
                     param_bounds.builtin_bounds.add(ty::BoundStatic);
+                }
+
+                UnboxedFnTyParamBound(ref unboxed_function) => {
+                    let rscope = ExplicitRscope;
+                    let self_ty = ty::mk_param(ccx.tcx,
+                                               param_ty.space,
+                                               param_ty.idx,
+                                               param_ty.def_id);
+                    let trait_ref =
+                        astconv::trait_ref_for_unboxed_function(ccx,
+                                                                &rscope,
+                                                                unboxed_function,
+                                                                Some(self_ty));
+                    param_bounds.trait_bounds.push(Rc::new(trait_ref));
+                }
+
+                OtherRegionTyParamBound(span) => {
+                    if !ccx.tcx.sess.features.issue_5723_bootstrap.get() {
+                        ccx.tcx.sess.span_err(
+                            span,
+                            "only the 'static lifetime is accepted here.");
+                    }
                 }
             }
         }
 
+        add_unsized_bound(ccx,
+                          unbound,
+                          &mut param_bounds.builtin_bounds,
+                          "type parameter",
+                          span);
+
+        check_bounds_compatible(ccx.tcx, &param_bounds, ident, span);
+
         param_bounds
+    }
+
+    fn check_bounds_compatible(tcx: &ty::ctxt,
+                               param_bounds: &ty::ParamBounds,
+                               ident: ast::Ident,
+                               span: Span) {
+        // Currently the only bound which is incompatible with other bounds is
+        // Sized/Unsized.
+        if !param_bounds.builtin_bounds.contains_elem(ty::BoundSized) {
+            ty::each_bound_trait_and_supertraits(tcx,
+                                                 param_bounds.trait_bounds.as_slice(),
+                                                 |trait_ref| {
+                let trait_def = ty::lookup_trait_def(tcx, trait_ref.def_id);
+                if trait_def.bounds.contains_elem(ty::BoundSized) {
+                    tcx.sess.span_err(span,
+                        format!("incompatible bounds on type parameter {}, \
+                                 bound {} does not allow unsized type",
+                        token::get_ident(ident),
+                        ppaux::trait_ref_to_string(tcx,
+                                                &*trait_ref)).as_slice());
+                }
+                true
+            });
+        }
     }
 }
 
@@ -1017,46 +1187,60 @@ pub fn ty_of_foreign_fn_decl(ccx: &CrateCtxt,
                              decl: &ast::FnDecl,
                              def_id: ast::DefId,
                              ast_generics: &ast::Generics,
-                             abis: AbiSet)
-                          -> ty::ty_param_bounds_and_ty {
-    let ty_generics = ty_generics(ccx, ast_generics, 0);
+                             abi: abi::Abi)
+                          -> ty::Polytype {
+
+    for i in decl.inputs.iter() {
+        match (*i).pat.node {
+            ast::PatIdent(_, _, _) => (),
+            ast::PatWild => (),
+            _ => ccx.tcx.sess.span_err((*i).pat.span,
+                    "patterns aren't allowed in foreign function declarations")
+        }
+    }
+
+    let ty_generics_for_fn_or_method =
+        ty_generics_for_fn_or_method(ccx, ast_generics,
+                                     ty::Generics::empty());
     let rb = BindingRscope::new(def_id.node);
-    let input_tys = decl.inputs.map(|a| ty_of_arg(ccx, &rb, a, None) );
-    let output_ty = ast_ty_to_ty(ccx, &rb, decl.output);
+    let input_tys = decl.inputs
+                        .iter()
+                        .map(|a| ty_of_arg(ccx, &rb, a, None))
+                        .collect();
+
+    let output_ty = ast_ty_to_ty(ccx, &rb, &*decl.output);
 
     let t_fn = ty::mk_bare_fn(
         ccx.tcx,
         ty::BareFnTy {
-            abis: abis,
-            purity: ast::UnsafeFn,
+            abi: abi,
+            fn_style: ast::UnsafeFn,
             sig: ty::FnSig {binder_id: def_id.node,
                             inputs: input_tys,
                             output: output_ty,
                             variadic: decl.variadic}
         });
-    let tpt = ty_param_bounds_and_ty {
-        generics: ty_generics,
+    let pty = Polytype {
+        generics: ty_generics_for_fn_or_method,
         ty: t_fn
     };
 
-    let mut tcache = ccx.tcx.tcache.borrow_mut();
-    tcache.get().insert(def_id, tpt);
-    return tpt;
+    ccx.tcx.tcache.borrow_mut().insert(def_id, pty.clone());
+    return pty;
 }
 
 pub fn mk_item_substs(ccx: &CrateCtxt,
-                      ty_generics: &ty::Generics,
-                      self_ty: Option<ty::t>) -> ty::substs
+                      ty_generics: &ty::Generics)
+                      -> subst::Substs
 {
-    let params: ~[ty::t] =
-        ty_generics.type_param_defs.iter().enumerate().map(
-            |(i, t)| ty::mk_param(ccx.tcx, i, t.def_id)).collect();
+    let types =
+        ty_generics.types.map(
+            |def| ty::mk_param_from_def(ccx.tcx, def));
 
-    let regions: OptVec<ty::Region> =
-        ty_generics.region_param_defs.iter().enumerate().map(
-            |(i, l)| ty::ReEarlyBound(l.def_id.node, i, l.ident)).collect();
+    let regions =
+        ty_generics.regions.map(
+            |def| ty::ReEarlyBound(def.def_id.node, def.space,
+                                   def.index, def.name));
 
-    substs {regions: ty::NonerasedRegions(regions),
-            self_ty: self_ty,
-            tps: params}
+    subst::Substs::new(types, regions)
 }

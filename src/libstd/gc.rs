@@ -16,55 +16,34 @@ collector is task-local so `Gc<T>` is not sendable.
 
 */
 
-#[allow(experimental)];
+#![experimental]
+#![allow(experimental)]
 
-use kinds::Send;
-use clone::{Clone, DeepClone};
-use managed;
+use clone::Clone;
+use cmp::{Ord, PartialOrd, Ordering, Eq, PartialEq};
+use default::Default;
+use fmt;
+use hash;
+use kinds::marker;
+use option::Option;
+use ops::Deref;
+use raw;
 
 /// Immutable garbage-collected pointer type
 #[lang="gc"]
-#[cfg(not(test))]
-#[no_send]
 #[experimental = "Gc is currently based on reference-counting and will not collect cycles until \
                   task annihilation. For now, cycles need to be broken manually by using `Rc<T>` \
                   with a non-owning `Weak<T>` pointer. A tracing garbage collector is planned."]
 pub struct Gc<T> {
-    priv ptr: @T
+    _ptr: *mut T,
+    marker: marker::NoSend,
 }
 
-#[cfg(test)]
-#[no_send]
-pub struct Gc<T> {
-    priv ptr: @T
-}
-
-impl<T: 'static> Gc<T> {
-    /// Construct a new garbage-collected box
-    #[inline]
-    pub fn new(value: T) -> Gc<T> {
-        Gc { ptr: @value }
-    }
-
-    /// Borrow the value contained in the garbage-collected box
-    #[inline]
-    pub fn borrow<'r>(&'r self) -> &'r T {
-        &*self.ptr
-    }
-
-    /// Determine if two garbage-collected boxes point to the same object
-    #[inline]
-    pub fn ptr_eq(&self, other: &Gc<T>) -> bool {
-        managed::ptr_eq(self.ptr, other.ptr)
-    }
-}
-
+#[unstable]
 impl<T> Clone for Gc<T> {
     /// Clone the pointer only
     #[inline]
-    fn clone(&self) -> Gc<T> {
-        Gc{ ptr: self.ptr }
-    }
+    fn clone(&self) -> Gc<T> { *self }
 }
 
 /// An value that represents the task-local managed heap.
@@ -74,16 +53,53 @@ impl<T> Clone for Gc<T> {
 #[cfg(not(test))]
 pub static GC: () = ();
 
-#[cfg(test)]
-pub static GC: () = ();
-
-/// The `Send` bound restricts this to acyclic graphs where it is well-defined.
-///
-/// A `Freeze` bound would also work, but `Send` *or* `Freeze` cannot be expressed.
-impl<T: DeepClone + Send + 'static> DeepClone for Gc<T> {
+impl<T: PartialEq + 'static> PartialEq for Gc<T> {
     #[inline]
-    fn deep_clone(&self) -> Gc<T> {
-        Gc::new(self.borrow().deep_clone())
+    fn eq(&self, other: &Gc<T>) -> bool { *(*self) == *(*other) }
+    #[inline]
+    fn ne(&self, other: &Gc<T>) -> bool { *(*self) != *(*other) }
+}
+impl<T: PartialOrd + 'static> PartialOrd for Gc<T> {
+    #[inline]
+    fn partial_cmp(&self, other: &Gc<T>) -> Option<Ordering> {
+        (**self).partial_cmp(&**other)
+    }
+    #[inline]
+    fn lt(&self, other: &Gc<T>) -> bool { *(*self) < *(*other) }
+    #[inline]
+    fn le(&self, other: &Gc<T>) -> bool { *(*self) <= *(*other) }
+    #[inline]
+    fn ge(&self, other: &Gc<T>) -> bool { *(*self) >= *(*other) }
+    #[inline]
+    fn gt(&self, other: &Gc<T>) -> bool { *(*self) > *(*other) }
+}
+impl<T: Ord + 'static> Ord for Gc<T> {
+    #[inline]
+    fn cmp(&self, other: &Gc<T>) -> Ordering { (**self).cmp(&**other) }
+}
+impl<T: Eq + 'static> Eq for Gc<T> {}
+
+impl<T: 'static> Deref<T> for Gc<T> {
+    fn deref<'a>(&'a self) -> &'a T { &**self }
+}
+
+impl<T: Default + 'static> Default for Gc<T> {
+    fn default() -> Gc<T> {
+        box(GC) Default::default()
+    }
+}
+
+impl<T: 'static> raw::Repr<*const raw::Box<T>> for Gc<T> {}
+
+impl<S: hash::Writer, T: hash::Hash<S> + 'static> hash::Hash<S> for Gc<T> {
+    fn hash(&self, s: &mut S) {
+        (**self).hash(s)
+    }
+}
+
+impl<T: 'static + fmt::Show> fmt::Show for Gc<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        (**self).fmt(f)
     }
 }
 
@@ -94,23 +110,18 @@ mod tests {
     use cell::RefCell;
 
     #[test]
-    fn test_clone() {
-        let x = Gc::new(RefCell::new(5));
-        let y = x.clone();
-        x.borrow().with_mut(|inner| {
-            *inner = 20;
-        });
-        assert_eq!(y.borrow().with(|x| *x), 20);
+    fn test_managed_clone() {
+        let a = box(GC) 5i;
+        let b: Gc<int> = a.clone();
+        assert!(a == b);
     }
 
     #[test]
-    fn test_deep_clone() {
+    fn test_clone() {
         let x = Gc::new(RefCell::new(5));
-        let y = x.deep_clone();
-        x.borrow().with_mut(|inner| {
-            *inner = 20;
-        });
-        assert_eq!(y.borrow().with(|x| *x), 5);
+        let y = x.clone();
+        *x.borrow().borrow_mut() = 20;
+        assert_eq!(*y.borrow().borrow(), 20);
     }
 
     #[test]
@@ -139,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_destructor() {
-        let x = Gc::new(~5);
+        let x = Gc::new(box 5);
         assert_eq!(**x.borrow(), 5);
     }
 }

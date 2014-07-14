@@ -9,8 +9,8 @@
 // except according to those terms.
 
 pub fn main() {
-    let mut sum = 0;
-    let xs = ~[1, 2, 3, 4, 5];
+    let mut sum = 0i;
+    let xs = vec!(1, 2, 3, 4, 5);
     for x in xs.iter() {
         sum += *x;
     }

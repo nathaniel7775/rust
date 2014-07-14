@@ -9,5 +9,6 @@
 // except according to those terms.
 
 fn main() {
-    let vec = bytes!(foo); //~ ERROR Non-literal in bytes!
+    let vec = bytes!(foo); //~ ERROR non-literal in bytes!
+    //~^ WARN `bytes!` is deprecated
 }

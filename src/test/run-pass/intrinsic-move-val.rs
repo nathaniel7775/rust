@@ -8,7 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::cast::transmute;
+#![feature(intrinsics)]
+
+use std::mem::transmute;
 
 mod rusti {
     extern "rust-intrinsic" {
@@ -19,9 +21,9 @@ mod rusti {
 
 pub fn main() {
     unsafe {
-        let x = ~1;
+        let x = box 1i;
         let mut y = rusti::init();
-        let mut z: *uint = transmute(&x);
+        let mut z: *const uint = transmute(&x);
         rusti::move_val_init(&mut y, x);
         assert_eq!(*y, 1);
         assert_eq!(*z, 0); // `x` is nulled out, not directly visible

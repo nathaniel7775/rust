@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
-
 /**
  * A function that returns a hash of a value
  *
@@ -39,6 +37,6 @@ impl<K,V> HashMap<K,V> {
 }
 
 pub fn main() {
-    let mut m = ~linear_map::<(),()>();
+    let mut m = box linear_map::<(),()>();
     assert_eq!(m.len(), 0);
 }

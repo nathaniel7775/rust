@@ -16,54 +16,59 @@ use ast;
 use codemap::Span;
 use ext::base;
 use ext::base::*;
-use parse;
+use parse::token::InternedString;
 use parse::token;
+
+use std::gc::GC;
 
 enum State {
     Asm,
     Outputs,
     Inputs,
     Clobbers,
-    Options
+    Options,
+    StateNone
 }
 
-fn next_state(s: State) -> Option<State> {
-    match s {
-        Asm      => Some(Outputs),
-        Outputs  => Some(Inputs),
-        Inputs   => Some(Clobbers),
-        Clobbers => Some(Options),
-        Options  => None
+impl State {
+    fn next(&self) -> State {
+        match *self {
+            Asm       => Outputs,
+            Outputs   => Inputs,
+            Inputs    => Clobbers,
+            Clobbers  => Options,
+            Options   => StateNone,
+            StateNone => StateNone
+        }
     }
 }
 
-pub fn expand_asm(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-               -> base::MacResult {
-    let mut p = parse::new_parser_from_tts(cx.parse_sess(),
-                                           cx.cfg(),
-                                           tts.to_owned());
+static OPTIONS: &'static [&'static str] = &["volatile", "alignstack", "intel"];
 
-    let mut asm = @"";
+pub fn expand_asm(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
+                  -> Box<base::MacResult> {
+    let mut p = cx.new_parser_from_tts(tts);
+    let mut asm = InternedString::new("");
     let mut asm_str_style = None;
-    let mut outputs = ~[];
-    let mut inputs = ~[];
-    let mut cons = ~"";
+    let mut outputs = Vec::new();
+    let mut inputs = Vec::new();
+    let mut cons = "".to_string();
     let mut volatile = false;
     let mut alignstack = false;
     let mut dialect = ast::AsmAtt;
 
     let mut state = Asm;
 
-    // Not using labeled break to get us through one round of bootstrapping.
-    let mut continue_ = true;
-    while continue_ {
+    let mut read_write_operands = Vec::new();
+
+    'statement: loop {
         match state {
             Asm => {
-                let (s, style) = match expr_to_str(cx, p.parse_expr(),
+                let (s, style) = match expr_to_string(cx, p.parse_expr(),
                                                    "inline assembly must be a string literal.") {
                     Some((s, st)) => (s, st),
                     // let compilation continue
-                    None => return MacResult::dummy_expr(),
+                    None => return DummyResult::expr(sp),
                 };
                 asm = s;
                 asm_str_style = Some(style);
@@ -79,18 +84,35 @@ pub fn expand_asm(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
 
                     let (constraint, _str_style) = p.parse_str();
 
-                    if constraint.starts_with("+") {
-                        cx.span_unimpl(p.last_span,
-                                       "'+' (read+write) output operand constraint modifier");
-                    } else if !constraint.starts_with("=") {
-                        cx.span_err(p.last_span, "output operand constraint lacks '='");
-                    }
+                    let span = p.last_span;
 
                     p.expect(&token::LPAREN);
                     let out = p.parse_expr();
                     p.expect(&token::RPAREN);
 
-                    outputs.push((constraint, out));
+                    // Expands a read+write operand into two operands.
+                    //
+                    // Use '+' modifier when you want the same expression
+                    // to be both an input and an output at the same time.
+                    // It's the opposite of '=&' which means that the memory
+                    // cannot be shared with any other operand (usually when
+                    // a register is clobbered early.)
+                    let output = match constraint.get().slice_shift_char() {
+                        (Some('='), _) => None,
+                        (Some('+'), operand) => {
+                            // Save a reference to the output
+                            read_write_operands.push((outputs.len(), out));
+                            Some(token::intern_and_get_ident(format!(
+                                        "={}",
+                                        operand).as_slice()))
+                        }
+                        _ => {
+                            cx.span_err(span, "output operand constraint lacks '=' or '+'");
+                            None
+                        }
+                    };
+
+                    outputs.push((output.unwrap_or(constraint), out));
                 }
             }
             Inputs => {
@@ -104,9 +126,9 @@ pub fn expand_asm(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
 
                     let (constraint, _str_style) = p.parse_str();
 
-                    if constraint.starts_with("=") {
+                    if constraint.get().starts_with("=") {
                         cx.span_err(p.last_span, "input operand constraint contains '='");
-                    } else if constraint.starts_with("+") {
+                    } else if constraint.get().starts_with("+") {
                         cx.span_err(p.last_span, "input operand constraint contains '+'");
                     }
 
@@ -118,7 +140,7 @@ pub fn expand_asm(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
                 }
             }
             Clobbers => {
-                let mut clobs = ~[];
+                let mut clobs = Vec::new();
                 while p.token != token::EOF &&
                       p.token != token::COLON &&
                       p.token != token::MOD_SEP {
@@ -128,8 +150,12 @@ pub fn expand_asm(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
                     }
 
                     let (s, _str_style) = p.parse_str();
-                    let clob = format!("~\\{{}\\}", s);
+                    let clob = format!("~{{{}}}", s);
                     clobs.push(clob);
+
+                    if OPTIONS.iter().any(|opt| s.equiv(opt)) {
+                        cx.span_warn(p.last_span, "expected a clobber, but found an option");
+                    }
                 }
 
                 cons = clobs.connect(",");
@@ -137,63 +163,58 @@ pub fn expand_asm(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
             Options => {
                 let (option, _str_style) = p.parse_str();
 
-                if "volatile" == option {
+                if option.equiv(&("volatile")) {
+                    // Indicates that the inline assembly has side effects
+                    // and must not be optimized out along with its outputs.
                     volatile = true;
-                } else if "alignstack" == option {
+                } else if option.equiv(&("alignstack")) {
                     alignstack = true;
-                } else if "intel" == option {
+                } else if option.equiv(&("intel")) {
                     dialect = ast::AsmIntel;
+                } else {
+                    cx.span_warn(p.last_span, "unrecognized option");
                 }
 
                 if p.token == token::COMMA {
                     p.eat(&token::COMMA);
                 }
             }
+            StateNone => ()
         }
 
-        while p.token == token::COLON   ||
-              p.token == token::MOD_SEP ||
-              p.token == token::EOF {
-            state = if p.token == token::COLON {
-                p.bump();
-                match next_state(state) {
-                    Some(x) => x,
-                    None    => {
-                        continue_ = false;
-                        break
-                    }
+        loop {
+            // MOD_SEP is a double colon '::' without space in between.
+            // When encountered, the state must be advanced twice.
+            match (&p.token, state.next(), state.next().next()) {
+                (&token::COLON, StateNone, _)   |
+                (&token::MOD_SEP, _, StateNone) => {
+                    p.bump();
+                    break 'statement;
                 }
-            } else if p.token == token::MOD_SEP {
-                p.bump();
-                let s = match next_state(state) {
-                    Some(x) => x,
-                    None    => {
-                        continue_ = false;
-                        break
-                    }
-                };
-                match next_state(s) {
-                    Some(x) => x,
-                    None    => {
-                        continue_ = false;
-                        break
-                    }
+                (&token::COLON, st, _)   |
+                (&token::MOD_SEP, _, st) => {
+                    p.bump();
+                    state = st;
                 }
-            } else if p.token == token::EOF {
-                continue_ = false;
-                break;
-            } else {
-               state
-            };
+                (&token::EOF, _, _) => break 'statement,
+                _ => break
+            }
         }
     }
 
-    MRExpr(@ast::Expr {
+    // Append an input operand, with the form of ("0", expr)
+    // that links to an output operand.
+    for &(i, out) in read_write_operands.iter() {
+        inputs.push((token::intern_and_get_ident(i.to_string().as_slice()),
+                                                 out));
+    }
+
+    MacExpr::new(box(GC) ast::Expr {
         id: ast::DUMMY_NODE_ID,
         node: ast::ExprInlineAsm(ast::InlineAsm {
-            asm: asm,
+            asm: token::intern_and_get_ident(asm.get()),
             asm_str_style: asm_str_style.unwrap(),
-            clobbers: cons.to_managed(),
+            clobbers: token::intern_and_get_ident(cons.as_slice()),
             inputs: inputs,
             outputs: outputs,
             volatile: volatile,

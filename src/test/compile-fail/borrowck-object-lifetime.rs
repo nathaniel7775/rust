@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
 
 trait Foo {
     fn borrowed<'a>(&'a self) -> &'a ();
@@ -18,24 +17,16 @@ fn borrowed_receiver<'a>(x: &'a Foo) -> &'a () {
     x.borrowed()
 }
 
-fn managed_receiver(x: @Foo) -> &() {
-    x.borrowed() //~ ERROR cannot root managed value long enough
+fn owned_receiver(x: Box<Foo>) -> &() {
+    x.borrowed() //~ ERROR `*x` does not live long enough
 }
 
-fn managed_receiver_1(x: @Foo) {
-    *x.borrowed()
-}
-
-fn owned_receiver(x: ~Foo) -> &() {
-    x.borrowed() //~ ERROR borrowed value does not live long enough
-}
-
-fn mut_owned_receiver(mut x: ~Foo) {
+fn mut_owned_receiver(mut x: Box<Foo>) {
     let _y = x.borrowed();
     let _z = &mut x; //~ ERROR cannot borrow
 }
 
-fn imm_owned_receiver(mut x: ~Foo) {
+fn imm_owned_receiver(mut x: Box<Foo>) {
     let _y = x.borrowed();
     let _z = &x;
 }

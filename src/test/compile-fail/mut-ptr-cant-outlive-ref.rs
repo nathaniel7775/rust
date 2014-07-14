@@ -11,10 +11,10 @@
 use std::cell::RefCell;
 
 fn main() {
-    let m = RefCell::new(0);
+    let m = RefCell::new(0i);
     let p;
     {
         let b = m.borrow();
-        p = b.get(); //~ ERROR borrowed value does not live long enough
+        p = &*b; //~ ERROR `b` does not live long enough
     }
 }

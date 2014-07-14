@@ -21,9 +21,10 @@ fn test_rec() {
     assert_eq!(rs.i, 100);
 }
 
+#[deriving(Show)]
 enum mood { happy, sad, }
 
-impl Eq for mood {
+impl PartialEq for mood {
     fn eq(&self, other: &mood) -> bool {
         ((*self) as uint) == ((*other) as uint)
     }

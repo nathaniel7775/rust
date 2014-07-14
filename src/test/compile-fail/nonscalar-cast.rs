@@ -10,10 +10,12 @@
 
 // error-pattern:non-scalar cast
 
+extern crate debug;
+
 struct foo {
     x:int
 }
 
 fn main() {
-    info!("{:?}", foo{ x: 1 } as int);
+    println!("{:?}", foo{ x: 1 } as int);
 }

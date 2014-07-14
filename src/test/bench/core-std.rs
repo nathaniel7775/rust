@@ -10,43 +10,45 @@
 
 // Microbenchmarks for various functions in std and extra
 
-#[feature(macro_rules)];
+#![feature(macro_rules)]
 
-extern mod extra;
+extern crate time;
 
-use extra::time::precise_time_s;
-use std::os;
-use std::rand::Rng;
+use time::precise_time_s;
 use std::rand;
+use std::rand::Rng;
+use std::mem::swap;
+use std::os;
 use std::str;
-use std::util;
 use std::vec;
 use std::io::File;
-
-macro_rules! bench (
-    ($argv:expr, $id:ident) => (maybe_run_test($argv, stringify!($id).to_owned(), $id))
-)
 
 fn main() {
     let argv = os::args();
     let _tests = argv.slice(1, argv.len());
 
-    bench!(argv, shift_push);
-    bench!(argv, read_line);
-    bench!(argv, vec_plus);
-    bench!(argv, vec_append);
-    bench!(argv, vec_push_all);
-    bench!(argv, is_utf8_ascii);
-    bench!(argv, is_utf8_multibyte);
+    macro_rules! bench (
+        ($id:ident) =>
+            (maybe_run_test(argv.as_slice(),
+                            stringify!($id).to_string(),
+                            $id)))
+
+    bench!(shift_push);
+    bench!(read_line);
+    bench!(vec_plus);
+    bench!(vec_append);
+    bench!(vec_push_all);
+    bench!(is_utf8_ascii);
+    bench!(is_utf8_multibyte);
 }
 
-fn maybe_run_test(argv: &[~str], name: ~str, test: ||) {
+fn maybe_run_test(argv: &[String], name: String, test: ||) {
     let mut run_test = false;
 
     if os::getenv("RUST_BENCH").is_some() {
         run_test = true
     } else if argv.len() > 0 {
-        run_test = argv.iter().any(|x| x == &~"all") || argv.iter().any(|x| x == &name)
+        run_test = argv.iter().any(|x| x == &"all".to_string()) || argv.iter().any(|x| x == &name)
     }
 
     if !run_test {
@@ -61,8 +63,8 @@ fn maybe_run_test(argv: &[~str], name: ~str, test: ||) {
 }
 
 fn shift_push() {
-    let mut v1 = vec::from_elem(30000, 1);
-    let mut v2 = ~[];
+    let mut v1 = Vec::from_elem(30000, 1i);
+    let mut v2 = Vec::new();
 
     while v1.len() > 0 {
         v2.push(v1.shift().unwrap());
@@ -75,7 +77,7 @@ fn read_line() {
     let mut path = Path::new(env!("CFG_SRC_DIR"));
     path.push("src/test/bench/shootout-k-nucleotide.data");
 
-    for _ in range(0, 3) {
+    for _ in range(0u, 3) {
         let mut reader = BufferedReader::new(File::open(&path).unwrap());
         for _line in reader.lines() {
         }
@@ -83,59 +85,59 @@ fn read_line() {
 }
 
 fn vec_plus() {
-    let mut r = rand::rng();
+    let mut r = rand::task_rng();
 
-    let mut v = ~[];
+    let mut v = Vec::new();
     let mut i = 0;
     while i < 1500 {
-        let rv = vec::from_elem(r.gen_range(0u, i + 1), i);
+        let rv = Vec::from_elem(r.gen_range(0u, i + 1), i);
         if r.gen() {
             v.push_all_move(rv);
         } else {
-            v = rv + v;
+            v = rv.clone().append(v.as_slice());
         }
         i += 1;
     }
 }
 
 fn vec_append() {
-    let mut r = rand::rng();
+    let mut r = rand::task_rng();
 
-    let mut v = ~[];
+    let mut v = Vec::new();
     let mut i = 0;
     while i < 1500 {
-        let rv = vec::from_elem(r.gen_range(0u, i + 1), i);
+        let rv = Vec::from_elem(r.gen_range(0u, i + 1), i);
         if r.gen() {
-            v = vec::append(v, rv);
+            v = v.clone().append(rv.as_slice());
         }
         else {
-            v = vec::append(rv, v);
+            v = rv.clone().append(v.as_slice());
         }
         i += 1;
     }
 }
 
 fn vec_push_all() {
-    let mut r = rand::rng();
+    let mut r = rand::task_rng();
 
-    let mut v = ~[];
+    let mut v = Vec::new();
     for i in range(0u, 1500) {
-        let mut rv = vec::from_elem(r.gen_range(0u, i + 1), i);
+        let mut rv = Vec::from_elem(r.gen_range(0u, i + 1), i);
         if r.gen() {
-            v.push_all(rv);
+            v.push_all(rv.as_slice());
         }
         else {
-            util::swap(&mut v, &mut rv);
-            v.push_all(rv);
+            swap(&mut v, &mut rv);
+            v.push_all(rv.as_slice());
         }
     }
 }
 
 fn is_utf8_ascii() {
-    let mut v : ~[u8] = ~[];
+    let mut v : Vec<u8> = Vec::new();
     for _ in range(0u, 20000) {
         v.push('b' as u8);
-        if !str::is_utf8(v) {
+        if !str::is_utf8(v.as_slice()) {
             fail!("is_utf8 failed");
         }
     }
@@ -143,10 +145,10 @@ fn is_utf8_ascii() {
 
 fn is_utf8_multibyte() {
     let s = "b¢€𤭢";
-    let mut v : ~[u8]= ~[];
+    let mut v : Vec<u8> = Vec::new();
     for _ in range(0u, 5000) {
         v.push_all(s.as_bytes());
-        if !str::is_utf8(v) {
+        if !str::is_utf8(v.as_slice()) {
             fail!("is_utf8 failed");
         }
     }

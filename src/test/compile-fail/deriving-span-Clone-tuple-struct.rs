@@ -8,10 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// This file was auto-generated using 'src/etc/generate-keyword-span-tests.py'
+// This file was auto-generated using 'src/etc/generate-deriving-span-tests.py'
 
-#[feature(struct_variant)];
-extern mod extra;
+#![feature(struct_variant)]
+extern crate rand;
 
 
 struct Error;

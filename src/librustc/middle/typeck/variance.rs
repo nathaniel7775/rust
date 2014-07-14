@@ -78,8 +78,8 @@ receiver position from being called via an object.)
 #### Trait variance and vtable resolution
 
 But traits aren't only used with objects. They're also used when
-deciding whether a given impl satisfies a given trait bound (or should
-be -- FIXME #5781). To set the scene here, imagine I had a function:
+deciding whether a given impl satisfies a given trait bound. To set the
+scene here, imagine I had a function:
 
     fn convertAll<A,T:ConvertTo<A>>(v: &[T]) {
         ...
@@ -192,25 +192,27 @@ represents the "variance transform" as defined in the paper:
 
 */
 
-use std::hashmap::HashMap;
+use std::collections::HashMap;
 use arena;
 use arena::Arena;
+use rl = middle::resolve_lifetime;
+use middle::subst;
+use middle::subst::{ParamSpace, FnSpace, TypeSpace, SelfSpace, VecPerParamSpace};
 use middle::ty;
-use std::vec;
+use std::fmt;
+use std::rc::Rc;
 use syntax::ast;
 use syntax::ast_map;
 use syntax::ast_util;
-use syntax::parse::token;
-use syntax::opt_vec;
 use syntax::visit;
 use syntax::visit::Visitor;
 use util::ppaux::Repr;
 
-pub fn infer_variance(tcx: ty::ctxt,
-                      crate: &ast::Crate) {
+pub fn infer_variance(tcx: &ty::ctxt,
+                      krate: &ast::Crate) {
     let mut arena = arena::Arena::new();
-    let terms_cx = determine_parameters_to_be_inferred(tcx, &mut arena, crate);
-    let constraints_cx = add_constraints_from_crate(terms_cx, crate);
+    let terms_cx = determine_parameters_to_be_inferred(tcx, &mut arena, krate);
+    let constraints_cx = add_constraints_from_crate(terms_cx, krate);
     solve_constraints(constraints_cx);
 }
 
@@ -237,13 +239,12 @@ enum VarianceTerm<'a> {
     InferredTerm(InferredIndex),
 }
 
-impl<'a> ToStr for VarianceTerm<'a> {
-    fn to_str(&self) -> ~str {
+impl<'a> fmt::Show for VarianceTerm<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            ConstantTerm(c1) => format!("{}", c1.to_str()),
-            TransformTerm(v1, v2) => format!("({} \u00D7 {})",
-                                          v1.to_str(), v2.to_str()),
-            InferredTerm(id) => format!("[{}]", { let InferredIndex(i) = id; i })
+            ConstantTerm(c1) => write!(f, "{}", c1),
+            TransformTerm(v1, v2) => write!(f, "({} \u00D7 {})", v1, v2),
+            InferredTerm(id) => write!(f, "[{}]", { let InferredIndex(i) = id; i })
         }
     }
 }
@@ -253,47 +254,53 @@ impl<'a> ToStr for VarianceTerm<'a> {
  */
 
 struct TermsContext<'a> {
-    tcx: ty::ctxt,
+    tcx: &'a ty::ctxt,
     arena: &'a Arena,
 
-    empty_variances: @ty::ItemVariances,
+    empty_variances: Rc<ty::ItemVariances>,
 
     // Maps from the node id of a type/generic parameter to the
     // corresponding inferred index.
     inferred_map: HashMap<ast::NodeId, InferredIndex>,
 
     // Maps from an InferredIndex to the info for that variable.
-    inferred_infos: ~[InferredInfo<'a>],
+    inferred_infos: Vec<InferredInfo<'a>> ,
 }
 
-enum ParamKind { TypeParam, RegionParam, SelfParam }
+#[deriving(Show)]
+enum ParamKind {
+    TypeParam,
+    RegionParam
+}
 
 struct InferredInfo<'a> {
     item_id: ast::NodeId,
     kind: ParamKind,
+    space: ParamSpace,
     index: uint,
     param_id: ast::NodeId,
     term: VarianceTermPtr<'a>,
 }
 
-fn determine_parameters_to_be_inferred<'a>(tcx: ty::ctxt,
+fn determine_parameters_to_be_inferred<'a>(tcx: &'a ty::ctxt,
                                            arena: &'a mut Arena,
-                                           crate: &ast::Crate)
+                                           krate: &ast::Crate)
                                            -> TermsContext<'a> {
     let mut terms_cx = TermsContext {
         tcx: tcx,
         arena: arena,
         inferred_map: HashMap::new(),
-        inferred_infos: ~[],
+        inferred_infos: Vec::new(),
 
         // cache and share the variance struct used for items with
         // no type/region parameters
-        empty_variances: @ty::ItemVariances { self_param: None,
-                                              type_params: opt_vec::Empty,
-                                              region_params: opt_vec::Empty }
+        empty_variances: Rc::new(ty::ItemVariances {
+            types: VecPerParamSpace::empty(),
+            regions: VecPerParamSpace::empty()
+        })
     };
 
-    visit::walk_crate(&mut terms_cx, crate, ());
+    visit::walk_crate(&mut terms_cx, krate, ());
 
     terms_cx
 }
@@ -302,12 +309,14 @@ impl<'a> TermsContext<'a> {
     fn add_inferred(&mut self,
                     item_id: ast::NodeId,
                     kind: ParamKind,
+                    space: ParamSpace,
                     index: uint,
                     param_id: ast::NodeId) {
         let inf_index = InferredIndex(self.inferred_infos.len());
         let term = self.arena.alloc(|| InferredTerm(inf_index));
         self.inferred_infos.push(InferredInfo { item_id: item_id,
                                                 kind: kind,
+                                                space: space,
                                                 index: index,
                                                 param_id: param_id,
                                                 term: term });
@@ -338,7 +347,7 @@ impl<'a> Visitor<()> for TermsContext<'a> {
         // item are assigned continuous indices.
         match item.node {
             ast::ItemTrait(..) => {
-                self.add_inferred(item.id, SelfParam, 0, item.id);
+                self.add_inferred(item.id, TypeParam, SelfSpace, 0, item.id);
             }
             _ => { }
         }
@@ -346,12 +355,12 @@ impl<'a> Visitor<()> for TermsContext<'a> {
         match item.node {
             ast::ItemEnum(_, ref generics) |
             ast::ItemStruct(_, ref generics) |
-            ast::ItemTrait(ref generics, _, _) => {
+            ast::ItemTrait(ref generics, _, _, _) => {
                 for (i, p) in generics.lifetimes.iter().enumerate() {
-                    self.add_inferred(item.id, RegionParam, i, p.id);
+                    self.add_inferred(item.id, RegionParam, TypeSpace, i, p.id);
                 }
                 for (i, p) in generics.ty_params.iter().enumerate() {
-                    self.add_inferred(item.id, TypeParam, i, p.id);
+                    self.add_inferred(item.id, TypeParam, TypeSpace, i, p.id);
                 }
 
                 // If this item has no type or lifetime parameters,
@@ -362,12 +371,9 @@ impl<'a> Visitor<()> for TermsContext<'a> {
                 // "invalid item id" from "item id with no
                 // parameters".
                 if self.num_inferred() == inferreds_on_entry {
-                    let mut item_variance_map = self.tcx
-                                                    .item_variance_map
-                                                    .borrow_mut();
-                    let newly_added = item_variance_map.get().insert(
+                    let newly_added = self.tcx.item_variance_map.borrow_mut().insert(
                         ast_util::local_def(item.id),
-                        self.empty_variances);
+                        self.empty_variances.clone());
                     assert!(newly_added);
                 }
 
@@ -397,13 +403,22 @@ impl<'a> Visitor<()> for TermsContext<'a> {
 struct ConstraintContext<'a> {
     terms_cx: TermsContext<'a>,
 
+    // These are the def-id of the std::kinds::marker::InvariantType,
+    // std::kinds::marker::InvariantLifetime, and so on. The arrays
+    // are indexed by the `ParamKind` (type, lifetime, self). Note
+    // that there are no marker types for self, so the entries for
+    // self are always None.
+    invariant_lang_items: [Option<ast::DefId>, ..2],
+    covariant_lang_items: [Option<ast::DefId>, ..2],
+    contravariant_lang_items: [Option<ast::DefId>, ..2],
+
     // These are pointers to common `ConstantTerm` instances
     covariant: VarianceTermPtr<'a>,
     contravariant: VarianceTermPtr<'a>,
     invariant: VarianceTermPtr<'a>,
     bivariant: VarianceTermPtr<'a>,
 
-    constraints: ~[Constraint<'a>],
+    constraints: Vec<Constraint<'a>> ,
 }
 
 /// Declares that the variable `decl_id` appears in a location with
@@ -414,21 +429,45 @@ struct Constraint<'a> {
 }
 
 fn add_constraints_from_crate<'a>(terms_cx: TermsContext<'a>,
-                                  crate: &ast::Crate)
+                                  krate: &ast::Crate)
                                   -> ConstraintContext<'a> {
+    let mut invariant_lang_items = [None, ..2];
+    let mut covariant_lang_items = [None, ..2];
+    let mut contravariant_lang_items = [None, ..2];
+
+    covariant_lang_items[TypeParam as uint] =
+        terms_cx.tcx.lang_items.covariant_type();
+    covariant_lang_items[RegionParam as uint] =
+        terms_cx.tcx.lang_items.covariant_lifetime();
+
+    contravariant_lang_items[TypeParam as uint] =
+        terms_cx.tcx.lang_items.contravariant_type();
+    contravariant_lang_items[RegionParam as uint] =
+        terms_cx.tcx.lang_items.contravariant_lifetime();
+
+    invariant_lang_items[TypeParam as uint] =
+        terms_cx.tcx.lang_items.invariant_type();
+    invariant_lang_items[RegionParam as uint] =
+        terms_cx.tcx.lang_items.invariant_lifetime();
+
     let covariant = terms_cx.arena.alloc(|| ConstantTerm(ty::Covariant));
     let contravariant = terms_cx.arena.alloc(|| ConstantTerm(ty::Contravariant));
     let invariant = terms_cx.arena.alloc(|| ConstantTerm(ty::Invariant));
     let bivariant = terms_cx.arena.alloc(|| ConstantTerm(ty::Bivariant));
     let mut constraint_cx = ConstraintContext {
         terms_cx: terms_cx,
+
+        invariant_lang_items: invariant_lang_items,
+        covariant_lang_items: covariant_lang_items,
+        contravariant_lang_items: contravariant_lang_items,
+
         covariant: covariant,
         contravariant: contravariant,
         invariant: invariant,
         bivariant: bivariant,
-        constraints: ~[],
+        constraints: Vec::new(),
     };
-    visit::walk_crate(&mut constraint_cx, crate, ());
+    visit::walk_crate(&mut constraint_cx, krate, ());
     constraint_cx
 }
 
@@ -449,13 +488,13 @@ impl<'a> Visitor<()> for ConstraintContext<'a> {
                 // `ty::VariantInfo::from_ast_variant()` ourselves
                 // here, mainly so as to mask the differences between
                 // struct-like enums and so forth.
-                for &ast_variant in enum_definition.variants.iter() {
+                for ast_variant in enum_definition.variants.iter() {
                     let variant =
                         ty::VariantInfo::from_ast_variant(tcx,
-                                                          ast_variant,
-                                                          /*discrimant*/ 0);
-                    for &arg_ty in variant.args.iter() {
-                        self.add_constraints_from_ty(arg_ty, self.covariant);
+                                                          &**ast_variant,
+                                                          /*discriminant*/ 0);
+                    for arg_ty in variant.args.iter() {
+                        self.add_constraints_from_ty(*arg_ty, self.covariant);
                     }
                 }
             }
@@ -463,7 +502,7 @@ impl<'a> Visitor<()> for ConstraintContext<'a> {
             ast::ItemStruct(..) => {
                 let struct_fields = ty::lookup_struct_fields(tcx, did);
                 for field_info in struct_fields.iter() {
-                    assert_eq!(field_info.id.crate, ast::LOCAL_CRATE);
+                    assert_eq!(field_info.id.krate, ast::LOCAL_CRATE);
                     let field_ty = ty::node_id_to_type(tcx, field_info.id.node);
                     self.add_constraints_from_ty(field_ty, self.covariant);
                 }
@@ -490,8 +529,15 @@ impl<'a> Visitor<()> for ConstraintContext<'a> {
     }
 }
 
+/// Is `param_id` a lifetime according to `map`?
+fn is_lifetime(map: &ast_map::Map, param_id: ast::NodeId) -> bool {
+    match map.find(param_id) {
+        Some(ast_map::NodeLifetime(..)) => true, _ => false
+    }
+}
+
 impl<'a> ConstraintContext<'a> {
-    fn tcx(&self) -> ty::ctxt {
+    fn tcx(&self) -> &'a ty::ctxt {
         self.terms_cx.tcx
     }
 
@@ -500,18 +546,81 @@ impl<'a> ConstraintContext<'a> {
             Some(&index) => index,
             None => {
                 self.tcx().sess.bug(format!(
-                        "No inferred index entry for {}",
-                        ast_map::node_id_to_str(self.tcx().items,
-                                                param_id,
-                                                token::get_ident_interner())));
+                        "no inferred index entry for {}",
+                        self.tcx().map.node_to_string(param_id)).as_slice());
             }
         }
+    }
+
+    fn find_binding_for_lifetime(&self, param_id: ast::NodeId) -> ast::NodeId {
+        let tcx = self.terms_cx.tcx;
+        assert!(is_lifetime(&tcx.map, param_id));
+        match tcx.named_region_map.find(&param_id) {
+            Some(&rl::DefEarlyBoundRegion(_, _, lifetime_decl_id))
+                => lifetime_decl_id,
+            Some(_) => fail!("should not encounter non early-bound cases"),
+
+            // The lookup should only fail when `param_id` is
+            // itself a lifetime binding: use it as the decl_id.
+            None    => param_id,
+        }
+
+    }
+
+    /// Is `param_id` a type parameter for which we infer variance?
+    fn is_to_be_inferred(&self, param_id: ast::NodeId) -> bool {
+        let result = self.terms_cx.inferred_map.contains_key(&param_id);
+
+        // To safe-guard against invalid inferred_map constructions,
+        // double-check if variance is inferred at some use of a type
+        // parameter (by inspecting parent of its binding declaration
+        // to see if it is introduced by a type or by a fn/impl).
+
+        let check_result = |this:&ConstraintContext| -> bool {
+            let tcx = this.terms_cx.tcx;
+            let decl_id = this.find_binding_for_lifetime(param_id);
+            // Currently only called on lifetimes; double-checking that.
+            assert!(is_lifetime(&tcx.map, param_id));
+            let parent_id = tcx.map.get_parent(decl_id);
+            let parent = tcx.map.find(parent_id).unwrap_or_else(
+                || fail!("tcx.map missing entry for id: {}", parent_id));
+
+            let is_inferred;
+            macro_rules! cannot_happen { () => { {
+                fail!("invalid parent: {:s} for {:s}",
+                      tcx.map.node_to_string(parent_id),
+                      tcx.map.node_to_string(param_id));
+            } } }
+
+            match parent {
+                ast_map::NodeItem(p) => {
+                    match p.node {
+                        ast::ItemTy(..) |
+                        ast::ItemEnum(..) |
+                        ast::ItemStruct(..) |
+                        ast::ItemTrait(..)   => is_inferred = true,
+                        ast::ItemFn(..)      => is_inferred = false,
+                        _                    => cannot_happen!(),
+                    }
+                }
+                ast_map::NodeTraitMethod(..) => is_inferred = false,
+                ast_map::NodeMethod(_)       => is_inferred = false,
+                _                            => cannot_happen!(),
+            }
+
+            return is_inferred;
+        };
+
+        assert_eq!(result, check_result(self));
+
+        return result;
     }
 
     fn declared_variance(&self,
                          param_def_id: ast::DefId,
                          item_def_id: ast::DefId,
                          kind: ParamKind,
+                         space: ParamSpace,
                          index: uint)
                          -> VarianceTermPtr<'a> {
         /*!
@@ -519,21 +628,27 @@ impl<'a> ConstraintContext<'a> {
          * the type/region parameter with the given id.
          */
 
-        assert_eq!(param_def_id.crate, item_def_id.crate);
-        if param_def_id.crate == ast::LOCAL_CRATE {
+        assert_eq!(param_def_id.krate, item_def_id.krate);
+
+        if self.invariant_lang_items[kind as uint] == Some(item_def_id) {
+            self.invariant
+        } else if self.covariant_lang_items[kind as uint] == Some(item_def_id) {
+            self.covariant
+        } else if self.contravariant_lang_items[kind as uint] == Some(item_def_id) {
+            self.contravariant
+        } else if param_def_id.krate == ast::LOCAL_CRATE {
             // Parameter on an item defined within current crate:
             // variance not yet inferred, so return a symbolic
             // variance.
             let InferredIndex(index) = self.inferred_index(param_def_id.node);
-            self.terms_cx.inferred_infos[index].term
+            self.terms_cx.inferred_infos.get(index).term
         } else {
             // Parameter on an item defined within another crate:
             // variance already inferred, just look it up.
             let variances = ty::item_variances(self.tcx(), item_def_id);
             let variance = match kind {
-                SelfParam => variances.self_param.unwrap(),
-                TypeParam => *variances.type_params.get(index),
-                RegionParam => *variances.region_params.get(index),
+                TypeParam => *variances.types.get(space, index),
+                RegionParam => *variances.regions.get(space, index),
             };
             self.constant_term(variance)
         }
@@ -543,7 +658,7 @@ impl<'a> ConstraintContext<'a> {
                       InferredIndex(index): InferredIndex,
                       variance: VarianceTermPtr<'a>) {
         debug!("add_constraint(index={}, variance={})",
-                index, variance.to_str());
+                index, variance.to_string());
         self.constraints.push(Constraint { inferred: InferredIndex(index),
                                            variance: variance });
     }
@@ -599,7 +714,7 @@ impl<'a> ConstraintContext<'a> {
         match ty::get(ty).sty {
             ty::ty_nil | ty::ty_bot | ty::ty_bool |
             ty::ty_char | ty::ty_int(_) | ty::ty_uint(_) |
-            ty::ty_float(_) => {
+            ty::ty_float(_) | ty::ty_str => {
                 /* leaf type -- noop */
             }
 
@@ -609,12 +724,7 @@ impl<'a> ConstraintContext<'a> {
                 self.add_constraints_from_mt(mt, variance);
             }
 
-            ty::ty_str(vstore) => {
-                self.add_constraints_from_vstore(vstore, variance);
-            }
-
-            ty::ty_vec(ref mt, vstore) => {
-                self.add_constraints_from_vstore(vstore, variance);
+            ty::ty_vec(ref mt, _) => {
                 self.add_constraints_from_mt(mt, variance);
             }
 
@@ -635,18 +745,51 @@ impl<'a> ConstraintContext<'a> {
             ty::ty_enum(def_id, ref substs) |
             ty::ty_struct(def_id, ref substs) => {
                 let item_type = ty::lookup_item_type(self.tcx(), def_id);
-                self.add_constraints_from_substs(def_id, &item_type.generics,
-                                                 substs, variance);
+                let generics = &item_type.generics;
+
+                // All type parameters on enums and structs should be
+                // in the TypeSpace.
+                assert!(generics.types.is_empty_in(subst::SelfSpace));
+                assert!(generics.types.is_empty_in(subst::FnSpace));
+                assert!(generics.regions.is_empty_in(subst::SelfSpace));
+                assert!(generics.regions.is_empty_in(subst::FnSpace));
+
+                self.add_constraints_from_substs(
+                    def_id,
+                    generics.types.get_slice(subst::TypeSpace),
+                    generics.regions.get_slice(subst::TypeSpace),
+                    substs,
+                    variance);
             }
 
-            ty::ty_trait(def_id, ref substs, _, _, _) => {
+            ty::ty_trait(box ty::TyTrait { def_id, ref substs, .. }) => {
                 let trait_def = ty::lookup_trait_def(self.tcx(), def_id);
-                self.add_constraints_from_substs(def_id, &trait_def.generics,
-                                                 substs, variance);
+                let generics = &trait_def.generics;
+
+                // Traits DO have a Self type parameter, but it is
+                // erased from object types.
+                assert!(!generics.types.is_empty_in(subst::SelfSpace) &&
+                        substs.types.is_empty_in(subst::SelfSpace));
+
+                // Traits never declare region parameters in the self
+                // space.
+                assert!(generics.regions.is_empty_in(subst::SelfSpace));
+
+                // Traits never declare type/region parameters in the
+                // fn space.
+                assert!(generics.types.is_empty_in(subst::FnSpace));
+                assert!(generics.regions.is_empty_in(subst::FnSpace));
+
+                self.add_constraints_from_substs(
+                    def_id,
+                    generics.types.get_slice(subst::TypeSpace),
+                    generics.regions.get_slice(subst::TypeSpace),
+                    substs,
+                    variance);
             }
 
-            ty::ty_param(ty::param_ty { def_id: ref def_id, .. }) => {
-                assert_eq!(def_id.crate, ast::LOCAL_CRATE);
+            ty::ty_param(ty::ParamTy { def_id: ref def_id, .. }) => {
+                assert_eq!(def_id.krate, ast::LOCAL_CRATE);
                 match self.terms_cx.inferred_map.find(&def_id.node) {
                     Some(&index) => {
                         self.add_constraint(index, variance);
@@ -659,74 +802,58 @@ impl<'a> ConstraintContext<'a> {
                 }
             }
 
-            ty::ty_self(ref def_id) => {
-                assert_eq!(def_id.crate, ast::LOCAL_CRATE);
-                let index = self.inferred_index(def_id.node);
-                self.add_constraint(index, variance);
-            }
-
-            ty::ty_bare_fn(ty::BareFnTy { sig: ref sig, .. }) => {
+            ty::ty_bare_fn(ty::BareFnTy { ref sig, .. }) |
+            ty::ty_closure(box ty::ClosureTy {
+                    ref sig,
+                    store: ty::UniqTraitStore,
+                    ..
+                }) => {
                 self.add_constraints_from_sig(sig, variance);
             }
 
-            ty::ty_closure(ty::ClosureTy { sig: ref sig, region, .. }) => {
+            ty::ty_closure(box ty::ClosureTy { ref sig,
+                    store: ty::RegionTraitStore(region, _), .. }) => {
                 let contra = self.contravariant(variance);
                 self.add_constraints_from_region(region, contra);
                 self.add_constraints_from_sig(sig, variance);
             }
 
-            ty::ty_infer(..) | ty::ty_err |
-            ty::ty_type | ty::ty_unboxed_vec(..) => {
+            ty::ty_infer(..) | ty::ty_err => {
                 self.tcx().sess.bug(
-                    format!("Unexpected type encountered in \
+                    format!("unexpected type encountered in \
                             variance inference: {}",
-                            ty.repr(self.tcx())));
+                            ty.repr(self.tcx())).as_slice());
             }
         }
     }
 
-    /// Adds constraints appropriate for a vector with vstore `vstore`
-    /// appearing in a context with ambient variance `variance`
-    fn add_constraints_from_vstore(&mut self,
-                                   vstore: ty::vstore,
-                                   variance: VarianceTermPtr<'a>) {
-        match vstore {
-            ty::vstore_slice(r) => {
-                let contra = self.contravariant(variance);
-                self.add_constraints_from_region(r, contra);
-            }
-
-            ty::vstore_fixed(_) | ty::vstore_uniq | ty::vstore_box => {
-            }
-        }
-    }
 
     /// Adds constraints appropriate for a nominal type (enum, struct,
     /// object, etc) appearing in a context with ambient variance `variance`
     fn add_constraints_from_substs(&mut self,
                                    def_id: ast::DefId,
-                                   generics: &ty::Generics,
-                                   substs: &ty::substs,
+                                   type_param_defs: &[ty::TypeParameterDef],
+                                   region_param_defs: &[ty::RegionParameterDef],
+                                   substs: &subst::Substs,
                                    variance: VarianceTermPtr<'a>) {
         debug!("add_constraints_from_substs(def_id={:?})", def_id);
 
-        for (i, p) in generics.type_param_defs.iter().enumerate() {
+        for p in type_param_defs.iter() {
             let variance_decl =
-                self.declared_variance(p.def_id, def_id, TypeParam, i);
+                self.declared_variance(p.def_id, def_id, TypeParam,
+                                       p.space, p.index);
             let variance_i = self.xform(variance, variance_decl);
-            self.add_constraints_from_ty(substs.tps[i], variance_i);
+            let substs_ty = *substs.types.get(p.space, p.index);
+            self.add_constraints_from_ty(substs_ty, variance_i);
         }
 
-        match substs.regions {
-            ty::ErasedRegions => {}
-            ty::NonerasedRegions(ref rps) => {
-                for (i, p) in generics.region_param_defs.iter().enumerate() {
-                    let variance_decl =
-                        self.declared_variance(p.def_id, def_id, RegionParam, i);
-                    let variance_i = self.xform(variance, variance_decl);
-                    self.add_constraints_from_region(*rps.get(i), variance_i);
-                }
-            }
+        for p in region_param_defs.iter() {
+            let variance_decl =
+                self.declared_variance(p.def_id, def_id,
+                                       RegionParam, p.space, p.index);
+            let variance_i = self.xform(variance, variance_decl);
+            let substs_r = *substs.regions().get(p.space, p.index);
+            self.add_constraints_from_region(substs_r, variance_i);
         }
     }
 
@@ -748,9 +875,11 @@ impl<'a> ConstraintContext<'a> {
                                    region: ty::Region,
                                    variance: VarianceTermPtr<'a>) {
         match region {
-            ty::ReEarlyBound(param_id, _, _) => {
-                let index = self.inferred_index(param_id);
-                self.add_constraint(index, variance);
+            ty::ReEarlyBound(param_id, _, _, _) => {
+                if self.is_to_be_inferred(param_id) {
+                    let index = self.inferred_index(param_id);
+                    self.add_constraint(index, variance);
+                }
             }
 
             ty::ReStatic => { }
@@ -764,9 +893,11 @@ impl<'a> ConstraintContext<'a> {
             ty::ReEmpty => {
                 // We don't expect to see anything but 'static or bound
                 // regions when visiting member types or method types.
-                self.tcx().sess.bug(format!("Unexpected region encountered in \
-                                            variance inference: {}",
-                                            region.repr(self.tcx())));
+                self.tcx()
+                    .sess
+                    .bug(format!("unexpected region encountered in variance \
+                                  inference: {}",
+                                 region.repr(self.tcx())).as_slice());
             }
         }
     }
@@ -800,15 +931,14 @@ impl<'a> ConstraintContext<'a> {
 
 struct SolveContext<'a> {
     terms_cx: TermsContext<'a>,
-    constraints: ~[Constraint<'a>],
+    constraints: Vec<Constraint<'a>> ,
 
     // Maps from an InferredIndex to the inferred value for that variable.
-    solutions: ~[ty::Variance]
-}
+    solutions: Vec<ty::Variance> }
 
 fn solve_constraints(constraints_cx: ConstraintContext) {
     let ConstraintContext { terms_cx, constraints, .. } = constraints_cx;
-    let solutions = vec::from_elem(terms_cx.num_inferred(), ty::Bivariant);
+    let solutions = Vec::from_elem(terms_cx.num_inferred(), ty::Bivariant);
     let mut solutions_cx = SolveContext {
         terms_cx: terms_cx,
         constraints: constraints,
@@ -833,18 +963,21 @@ impl<'a> SolveContext<'a> {
                 let Constraint { inferred, variance: term } = *constraint;
                 let InferredIndex(inferred) = inferred;
                 let variance = self.evaluate(term);
-                let old_value = self.solutions[inferred];
+                let old_value = *self.solutions.get(inferred);
                 let new_value = glb(variance, old_value);
                 if old_value != new_value {
                     debug!("Updating inferred {} (node {}) \
-                            from {:?} to {:?} due to {}",
+                            from {} to {} due to {}",
                             inferred,
-                            self.terms_cx.inferred_infos[inferred].param_id,
+                            self.terms_cx
+                                .inferred_infos
+                                .get(inferred)
+                                .param_id,
                             old_value,
                             new_value,
-                            term.to_str());
+                            term.to_string());
 
-                    self.solutions[inferred] = new_value;
+                    *self.solutions.get_mut(inferred) = new_value;
                     changed = true;
                 }
             }
@@ -867,30 +1000,31 @@ impl<'a> SolveContext<'a> {
         let mut index = 0;
         let num_inferred = self.terms_cx.num_inferred();
         while index < num_inferred {
-            let item_id = inferred_infos[index].item_id;
-            let mut item_variances = ty::ItemVariances {
-                self_param: None,
-                type_params: opt_vec::Empty,
-                region_params: opt_vec::Empty
-            };
+            let item_id = inferred_infos.get(index).item_id;
+            let mut types = VecPerParamSpace::empty();
+            let mut regions = VecPerParamSpace::empty();
+
             while index < num_inferred &&
-                  inferred_infos[index].item_id == item_id {
-                let info = &inferred_infos[index];
+                  inferred_infos.get(index).item_id == item_id {
+                let info = inferred_infos.get(index);
+                let variance = *solutions.get(index);
+                debug!("Index {} Info {} / {} / {} Variance {}",
+                       index, info.index, info.kind, info.space, variance);
                 match info.kind {
-                    SelfParam => {
-                        assert!(item_variances.self_param.is_none());
-                        item_variances.self_param = Some(solutions[index]);
-                    }
                     TypeParam => {
-                        item_variances.type_params.push(solutions[index]);
+                        types.push(info.space, variance);
                     }
                     RegionParam => {
-                        item_variances.region_params.push(solutions[index]);
+                        regions.push(info.space, variance);
                     }
                 }
                 index += 1;
             }
 
+            let item_variances = ty::ItemVariances {
+                types: types,
+                regions: regions
+            };
             debug!("item_id={} item_variances={}",
                     item_id,
                     item_variances.repr(tcx));
@@ -901,12 +1035,11 @@ impl<'a> SolveContext<'a> {
             // attribute and report an error with various results if found.
             if ty::has_attr(tcx, item_def_id, "rustc_variance") {
                 let found = item_variances.repr(tcx);
-                tcx.sess.span_err(ast_map::node_span(tcx.items, item_id), found);
+                tcx.sess.span_err(tcx.map.span(item_id), found.as_slice());
             }
 
-            let mut item_variance_map = tcx.item_variance_map.borrow_mut();
-            let newly_added = item_variance_map.get().insert(item_def_id,
-                                                             @item_variances);
+            let newly_added = tcx.item_variance_map.borrow_mut()
+                                 .insert(item_def_id, Rc::new(item_variances));
             assert!(newly_added);
         }
     }
@@ -924,7 +1057,7 @@ impl<'a> SolveContext<'a> {
             }
 
             InferredTerm(InferredIndex(index)) => {
-                self.solutions[index]
+                *self.solutions.get(index)
             }
         }
     }

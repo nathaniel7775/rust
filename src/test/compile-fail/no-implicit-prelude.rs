@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[no_implicit_prelude];
+#![no_implicit_prelude]
 
 // Test that things from the prelude aren't in scope. Use many of them
 // so that renaming some things won't magically make this test fail
@@ -20,7 +20,7 @@ struct Test;
 impl Add for Test {} //~ ERROR: attempt to implement a nonexistent trait
 impl Clone for Test {} //~ ERROR: attempt to implement a nonexistent trait
 impl Iterator for Test {} //~ ERROR: attempt to implement a nonexistent trait
-impl ToStr for Test {} //~ ERROR: attempt to implement a nonexistent trait
+impl ToString for Test {} //~ ERROR: attempt to implement a nonexistent trait
 impl Writer for Test {} //~ ERROR: attempt to implement a nonexistent trait
 
 fn main() {

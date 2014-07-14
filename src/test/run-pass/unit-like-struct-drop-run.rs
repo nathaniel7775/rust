@@ -10,6 +10,7 @@
 
 // Make sure the destructor is run for unit-like structs.
 
+use std::boxed::BoxAny;
 use std::task;
 
 struct Foo;
@@ -25,6 +26,6 @@ pub fn main() {
         let _b = Foo;
     });
 
-    let s = x.unwrap_err().move::<&'static str>().unwrap();
+    let s = x.unwrap_err().downcast::<&'static str>().unwrap();
     assert_eq!(s.as_slice(), "This failure should happen.");
 }

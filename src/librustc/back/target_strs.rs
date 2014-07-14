@@ -8,11 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(non_camel_case_types)]
 
 pub struct t {
-    module_asm: ~str,
-    meta_sect_name: ~str,
-    data_layout: ~str,
-    target_triple: ~str,
-    cc_args: ~[~str],
+    pub module_asm: String,
+    pub data_layout: String,
+    pub target_triple: String,
+    pub cc_args: Vec<String> ,
 }

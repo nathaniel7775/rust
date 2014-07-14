@@ -10,7 +10,9 @@
 
 // error-pattern:mismatched types: expected `()` but found `bool`
 
+extern crate debug;
+
 fn main() {
     let a = if true { true };
-    info!("{:?}", a);
+    println!("{:?}", a);
 }

@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -19,48 +19,28 @@ removed.
 
 use ast::{Expr, ExprLit, LitNil};
 use codemap::{Span, respan};
-use parse::parser::Parser;
+use parse::parser;
 use parse::token;
 
-use std::str;
-use std::to_bytes;
+use std::gc::{Gc, GC};
 
 /// The specific types of unsupported syntax
-#[deriving(Eq)]
+#[deriving(PartialEq, Eq, Hash)]
 pub enum ObsoleteSyntax {
-    ObsoleteSwap,
-    ObsoleteUnsafeBlock,
-    ObsoleteBareFnType,
-    ObsoleteNamedExternModule,
-    ObsoleteMultipleLocalDecl,
-    ObsoleteUnsafeExternFn,
-    ObsoleteTraitFuncVisibility,
-    ObsoleteConstPointer,
-    ObsoleteEmptyImpl,
-    ObsoleteLoopAsContinue,
-    ObsoleteEnumWildcard,
-    ObsoleteStructWildcard,
-    ObsoleteVecDotDotWildcard,
-    ObsoleteBoxedClosure,
-    ObsoleteClosureType,
-    ObsoleteMultipleImport,
-    ObsoleteExternModAttributesInParens,
-    ObsoleteManagedPattern,
-}
-
-impl to_bytes::IterBytes for ObsoleteSyntax {
-    #[inline]
-    fn iter_bytes(&self, lsb0: bool, f: to_bytes::Cb) -> bool {
-        (*self as uint).iter_bytes(lsb0, f)
-    }
+    ObsoleteOwnedType,
+    ObsoleteOwnedExpr,
+    ObsoleteOwnedPattern,
+    ObsoleteOwnedVector,
+    ObsoleteManagedType,
+    ObsoleteManagedExpr,
 }
 
 pub trait ParserObsoleteMethods {
     /// Reports an obsolete syntax non-fatal error.
     fn obsolete(&mut self, sp: Span, kind: ObsoleteSyntax);
-    // Reports an obsolete syntax non-fatal error, and returns
-    // a placeholder expression
-    fn obsolete_expr(&mut self, sp: Span, kind: ObsoleteSyntax) -> @Expr;
+    /// Reports an obsolete syntax non-fatal error, and returns
+    /// a placeholder expression
+    fn obsolete_expr(&mut self, sp: Span, kind: ObsoleteSyntax) -> Gc<Expr>;
     fn report(&mut self,
               sp: Span,
               kind: ObsoleteSyntax,
@@ -70,101 +50,44 @@ pub trait ParserObsoleteMethods {
     fn eat_obsolete_ident(&mut self, ident: &str) -> bool;
 }
 
-impl ParserObsoleteMethods for Parser {
+impl<'a> ParserObsoleteMethods for parser::Parser<'a> {
     /// Reports an obsolete syntax non-fatal error.
     fn obsolete(&mut self, sp: Span, kind: ObsoleteSyntax) {
         let (kind_str, desc) = match kind {
-            ObsoleteSwap => (
-                "swap",
-                "Use std::util::{swap, replace} instead"
+            ObsoleteOwnedType => (
+                "`~` notation for owned pointers",
+                "use `Box<T>` in `std::owned` instead"
             ),
-            ObsoleteUnsafeBlock => (
-                "non-standalone unsafe block",
-                "use an inner `unsafe { ... }` block instead"
+            ObsoleteOwnedExpr => (
+                "`~` notation for owned pointer allocation",
+                "use the `box` operator instead of `~`"
             ),
-            ObsoleteBareFnType => (
-                "bare function type",
-                "use `|A| -> B` or `extern fn(A) -> B` instead"
+            ObsoleteOwnedPattern => (
+                "`~` notation for owned pointer patterns",
+                "use the `box` operator instead of `~`"
             ),
-            ObsoleteNamedExternModule => (
-                "named external module",
-                "instead of `extern mod foo { ... }`, write `mod foo { \
-                 extern { ... } }`"
+            ObsoleteOwnedVector => (
+                "`~[T]` is no longer a type",
+                "use the `Vec` type instead"
             ),
-            ObsoleteMultipleLocalDecl => (
-                "declaration of multiple locals at once",
-                "instead of e.g. `let a = 1, b = 2`, write \
-                 `let (a, b) = (1, 2)`."
+            ObsoleteManagedType => (
+                "`@` notation for managed pointers",
+                "use `Gc<T>` in `std::gc` instead"
             ),
-            ObsoleteUnsafeExternFn => (
-                "unsafe external function",
-                "external functions are always unsafe; remove the `unsafe` \
-                 keyword"
-            ),
-            ObsoleteTraitFuncVisibility => (
-                "visibility not necessary",
-                "trait functions inherit the visibility of the trait itself"
-            ),
-            ObsoleteConstPointer => (
-                "const pointer",
-                "instead of `&const Foo` or `@const Foo`, write `&Foo` or \
-                 `@Foo`"
-            ),
-            ObsoleteEmptyImpl => (
-                "empty implementation",
-                "instead of `impl A;`, write `impl A {}`"
-            ),
-            ObsoleteLoopAsContinue => (
-                "`loop` instead of `continue`",
-                "`loop` is now only used for loops and `continue` is used for \
-                 skipping iterations"
-            ),
-            ObsoleteEnumWildcard => (
-                "enum wildcard",
-                "use `..` instead of `*` for matching all enum fields"
-            ),
-            ObsoleteStructWildcard => (
-                "struct wildcard",
-                "use `..` instead of `_` for matching trailing struct fields"
-            ),
-            ObsoleteVecDotDotWildcard => (
-                "vec slice wildcard",
-                "use `..` instead of `.._` for matching slices"
-            ),
-            ObsoleteBoxedClosure => (
-                "managed or owned closure",
-                "managed closures have been removed and owned closures are \
-                 now written `proc()`"
-            ),
-            ObsoleteClosureType => (
-                "closure type",
-                "closures are now written `|A| -> B` rather than `&fn(A) -> \
-                 B`."
-            ),
-            ObsoleteMultipleImport => (
-                "multiple imports",
-                "only one import is allowed per `use` statement"
-            ),
-            ObsoleteExternModAttributesInParens => (
-                "`extern mod` with linkage attribute list",
-                "use `extern mod foo = \"bar\";` instead of \
-                `extern mod foo (name = \"bar\")`"
-            ),
-            ObsoleteManagedPattern => (
-                "managed pointer pattern",
-                "use a nested `match` expression instead of a managed box \
-                 pattern"
+            ObsoleteManagedExpr => (
+                "`@` notation for a managed pointer allocation",
+                "use the `box(GC)` oeprator instead of `@`"
             ),
         };
 
         self.report(sp, kind, kind_str, desc);
     }
 
-    // Reports an obsolete syntax non-fatal error, and returns
-    // a placeholder expression
-    fn obsolete_expr(&mut self, sp: Span, kind: ObsoleteSyntax) -> @Expr {
+    /// Reports an obsolete syntax non-fatal error, and returns
+    /// a placeholder expression
+    fn obsolete_expr(&mut self, sp: Span, kind: ObsoleteSyntax) -> Gc<Expr> {
         self.obsolete(sp, kind);
-        self.mk_expr(sp.lo, sp.hi, ExprLit(@respan(sp, LitNil)))
+        self.mk_expr(sp.lo, sp.hi, ExprLit(box(GC) respan(sp, LitNil)))
     }
 
     fn report(&mut self,
@@ -172,10 +95,14 @@ impl ParserObsoleteMethods for Parser {
               kind: ObsoleteSyntax,
               kind_str: &str,
               desc: &str) {
-        self.span_err(sp, format!("obsolete syntax: {}", kind_str));
+        self.span_err(sp,
+                      format!("obsolete syntax: {}", kind_str).as_slice());
 
         if !self.obsolete_set.contains(&kind) {
-            self.sess.span_diagnostic.handler().note(format!("{}", desc));
+            self.sess
+                .span_diagnostic
+                .handler()
+                .note(format!("{}", desc).as_slice());
             self.obsolete_set.insert(kind);
         }
     }
@@ -183,7 +110,7 @@ impl ParserObsoleteMethods for Parser {
     fn is_obsolete_ident(&mut self, ident: &str) -> bool {
         match self.token {
             token::IDENT(sid, _) => {
-                str::eq_slice(self.id_to_str(sid), ident)
+                token::get_ident(sid).equiv(&ident)
             }
             _ => false
         }

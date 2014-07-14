@@ -14,52 +14,58 @@ use codemap::Span;
 use ext::base::ExtCtxt;
 use ext::build::AstBuilder;
 use ext::deriving::generic::*;
-use std::cmp::{Ordering, Equal, Less, Greater};
+use ext::deriving::generic::ty::*;
+use parse::token::InternedString;
 
-pub fn expand_deriving_totalord(cx: &ExtCtxt,
+use std::gc::Gc;
+
+pub fn expand_deriving_totalord(cx: &mut ExtCtxt,
                                 span: Span,
-                                mitem: @MetaItem,
-                                in_items: ~[@Item]) -> ~[@Item] {
+                                mitem: Gc<MetaItem>,
+                                item: Gc<Item>,
+                                push: |Gc<Item>|) {
+    let inline = cx.meta_word(span, InternedString::new("inline"));
+    let attrs = vec!(cx.attribute(span, inline));
     let trait_def = TraitDef {
-        cx: cx, span: span,
-
-        path: Path::new(~["std", "cmp", "TotalOrd"]),
-        additional_bounds: ~[],
+        span: span,
+        attributes: Vec::new(),
+        path: Path::new(vec!("std", "cmp", "Ord")),
+        additional_bounds: Vec::new(),
         generics: LifetimeBounds::empty(),
-        methods: ~[
+        methods: vec!(
             MethodDef {
                 name: "cmp",
                 generics: LifetimeBounds::empty(),
                 explicit_self: borrowed_explicit_self(),
-                args: ~[borrowed_self()],
-                ret_ty: Literal(Path::new(~["std", "cmp", "Ordering"])),
-                inline: true,
-                const_nonmatching: false,
-                combine_substructure: cs_cmp
+                args: vec!(borrowed_self()),
+                ret_ty: Literal(Path::new(vec!("std", "cmp", "Ordering"))),
+                attributes: attrs,
+                combine_substructure: combine_substructure(|a, b, c| {
+                    cs_cmp(a, b, c)
+                }),
             }
-        ]
+        )
     };
 
-    trait_def.expand(mitem, in_items)
+    trait_def.expand(cx, mitem, item, push)
 }
 
 
-pub fn ordering_const(cx: &ExtCtxt, span: Span, cnst: Ordering) -> ast::Path {
-    let cnst = match cnst {
-        Less => "Less",
-        Equal => "Equal",
-        Greater => "Greater"
-    };
-    cx.path_global(span,
-                   ~[cx.ident_of("std"),
-                     cx.ident_of("cmp"),
-                     cx.ident_of(cnst)])
+pub fn ordering_collapsed(cx: &mut ExtCtxt,
+                          span: Span,
+                          self_arg_tags: &[ast::Ident]) -> Gc<ast::Expr> {
+    let lft = cx.expr_ident(span, self_arg_tags[0]);
+    let rgt = cx.expr_addr_of(span, cx.expr_ident(span, self_arg_tags[1]));
+    cx.expr_method_call(span, lft, cx.ident_of("cmp"), vec![rgt])
 }
 
-pub fn cs_cmp(cx: &ExtCtxt, span: Span,
-              substr: &Substructure) -> @Expr {
+pub fn cs_cmp(cx: &mut ExtCtxt, span: Span,
+              substr: &Substructure) -> Gc<Expr> {
     let test_id = cx.ident_of("__test");
-    let equals_path = ordering_const(cx, span, Equal);
+    let equals_path = cx.path_global(span,
+                                     vec!(cx.ident_of("std"),
+                                          cx.ident_of("cmp"),
+                                          cx.ident_of("Equal")));
 
     /*
     Builds:
@@ -98,17 +104,14 @@ pub fn cs_cmp(cx: &ExtCtxt, span: Span,
             let if_ = cx.expr_if(span,
                                  cond,
                                  old, Some(cx.expr_ident(span, test_id)));
-            cx.expr_block(cx.block(span, ~[assign], Some(if_)))
+            cx.expr_block(cx.block(span, vec!(assign), Some(if_)))
         },
         cx.expr_path(equals_path.clone()),
-        |cx, span, list, _| {
-            match list {
-                // an earlier nonmatching variant is Less than a
-                // later one.
-                [(self_var, _, _),
-                 (other_var, _, _)] => cx.expr_path(ordering_const(cx, span,
-                                                                   self_var.cmp(&other_var))),
-                _ => cx.span_bug(span, "Not exactly 2 arguments in `deriving(TotalOrd)`")
+        |cx, span, (self_args, tag_tuple), _non_self_args| {
+            if self_args.len() != 2 {
+                cx.span_bug(span, "not exactly 2 arguments in `deriving(TotalOrd)`")
+            } else {
+                ordering_collapsed(cx, span, tag_tuple)
             }
         },
         cx, span, substr)

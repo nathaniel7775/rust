@@ -8,19 +8,21 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+extern crate debug;
+
 use std::task;
 
 pub fn main() {
-    let (p, ch) = Chan::new();
-    let _t = task::spawn(proc() { child(&ch) });
-    let y = p.recv();
-    error!("received");
-    error!("{:?}", y);
+    let (tx, rx) = channel();
+    let _t = task::spawn(proc() { child(&tx) });
+    let y = rx.recv();
+    println!("received");
+    println!("{:?}", y);
     assert_eq!(y, 10);
 }
 
-fn child(c: &Chan<int>) {
-    error!("sending");
+fn child(c: &Sender<int>) {
+    println!("sending");
     c.send(10);
-    error!("value sent");
+    println!("value sent");
 }

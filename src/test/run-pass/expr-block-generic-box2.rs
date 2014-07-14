@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,11 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
-// xfail-fast
+use std::gc::{GC, Gc};
 
-type compare<'a, T> = 'a |T, T| -> bool;
+type compare<'a, T> = |T, T|: 'a -> bool;
 
 fn test_generic<T:Clone>(expected: T, eq: compare<T>) {
     let actual: T = { expected.clone() };
@@ -20,8 +20,8 @@ fn test_generic<T:Clone>(expected: T, eq: compare<T>) {
 }
 
 fn test_vec() {
-    fn compare_vec(v1: @int, v2: @int) -> bool { return v1 == v2; }
-    test_generic::<@int>(@1, compare_vec);
+    fn compare_vec(v1: Gc<int>, v2: Gc<int>) -> bool { return v1 == v2; }
+    test_generic::<Gc<int>>(box(GC) 1, compare_vec);
 }
 
 pub fn main() { test_vec(); }

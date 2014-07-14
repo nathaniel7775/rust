@@ -1,7 +1,4 @@
-// xfail-fast #7103 `extern mod` does not work on check-fast
-// xfail-pretty - does not converge
-
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -11,29 +8,31 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra; // {En,De}codable
+extern crate serialize;
+extern crate rand;
+
 mod submod {
     // if any of these are implemented without global calls for any
     // function calls, then being in a submodule will (correctly)
     // cause errors about unrecognised module `std` (or `extra`)
-    #[deriving(Eq, Ord, TotalEq, TotalOrd,
-               IterBytes,
-               Clone, DeepClone,
-               ToStr, Rand,
+    #[deriving(PartialEq, PartialOrd, Eq, Ord,
+               Hash,
+               Clone,
+               Show, Rand,
                Encodable, Decodable)]
     enum A { A1(uint), A2(int) }
 
-    #[deriving(Eq, Ord, TotalEq, TotalOrd,
-               IterBytes,
-               Clone, DeepClone,
-               ToStr, Rand,
+    #[deriving(PartialEq, PartialOrd, Eq, Ord,
+               Hash,
+               Clone,
+               Show, Rand,
                Encodable, Decodable)]
     struct B { x: uint, y: int }
 
-    #[deriving(Eq, Ord, TotalEq, TotalOrd,
-               IterBytes,
-               Clone, DeepClone,
-               ToStr, Rand,
+    #[deriving(PartialEq, PartialOrd, Eq, Ord,
+               Hash,
+               Clone,
+               Show, Rand,
                Encodable, Decodable)]
     struct C(uint, int);
 

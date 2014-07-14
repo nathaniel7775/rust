@@ -8,17 +8,24 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes, unsafe_destructor)]
 
-extern mod extra;
+extern crate collections;
+extern crate time;
 
-use extra::list::{List, Cons, Nil};
-use extra::time::precise_time_s;
+use time::precise_time_s;
 use std::os;
 use std::task;
+use std::vec;
+use std::gc::{Gc, GC};
+
+#[deriving(Clone)]
+enum List<T> {
+    Nil, Cons(T, Gc<List<T>>)
+}
 
 enum UniqueList {
-    ULNil, ULCons(~UniqueList)
+    ULNil, ULCons(Box<UniqueList>)
 }
 
 fn main() {
@@ -33,11 +40,11 @@ fn main() {
 
 fn run(repeat: int, depth: int) {
     for _ in range(0, repeat) {
-        info!("starting {:.4f}", precise_time_s());
+        println!("starting {:.4f}", precise_time_s());
         task::try(proc() {
             recurse_or_fail(depth, None)
         });
-        info!("stopping {:.4f}", precise_time_s());
+        println!("stopping {:.4f}", precise_time_s());
     }
 }
 
@@ -46,15 +53,15 @@ type nillist = List<()>;
 // Filled with things that have to be unwound
 
 struct State {
-    managed: @nillist,
-    unique: ~nillist,
-    tuple: (@nillist, ~nillist),
-    vec: ~[@nillist],
+    managed: Gc<nillist>,
+    unique: Box<nillist>,
+    tuple: (Gc<nillist>, Box<nillist>),
+    vec: Vec<Gc<nillist>>,
     res: r
 }
 
 struct r {
-  _l: @nillist,
+  _l: Gc<nillist>,
 }
 
 #[unsafe_destructor]
@@ -62,7 +69,7 @@ impl Drop for r {
     fn drop(&mut self) {}
 }
 
-fn r(l: @nillist) -> r {
+fn r(l: Gc<nillist>) -> r {
     r {
         _l: l
     }
@@ -70,7 +77,7 @@ fn r(l: @nillist) -> r {
 
 fn recurse_or_fail(depth: int, st: Option<State>) {
     if depth == 0 {
-        info!("unwinding {:.4f}", precise_time_s());
+        println!("unwinding {:.4f}", precise_time_s());
         fail!();
     } else {
         let depth = depth - 1;
@@ -78,21 +85,22 @@ fn recurse_or_fail(depth: int, st: Option<State>) {
         let st = match st {
           None => {
             State {
-                managed: @Nil,
-                unique: ~Nil,
-                tuple: (@Nil, ~Nil),
-                vec: ~[@Nil],
-                res: r(@Nil)
+                managed: box(GC) Nil,
+                unique: box Nil,
+                tuple: (box(GC) Nil, box Nil),
+                vec: vec!(box(GC) Nil),
+                res: r(box(GC) Nil)
             }
           }
           Some(st) => {
             State {
-                managed: @Cons((), st.managed),
-                unique: ~Cons((), @*st.unique),
-                tuple: (@Cons((), st.tuple.first()),
-                        ~Cons((), @*st.tuple.second())),
-                vec: st.vec + &[@Cons((), *st.vec.last().unwrap())],
-                res: r(@Cons((), st.res._l))
+                managed: box(GC) Cons((), st.managed),
+                unique: box Cons((), box(GC) *st.unique),
+                tuple: (box(GC) Cons((), st.tuple.ref0().clone()),
+                        box Cons((), box(GC) *st.tuple.ref1().clone())),
+                vec: st.vec.clone().append(
+                        &[box(GC) Cons((), *st.vec.last().unwrap())]),
+                res: r(box(GC) Cons((), st.res._l))
             }
           }
         };

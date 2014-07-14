@@ -11,92 +11,90 @@
 use std::fmt;
 use std::io;
 
+use externalfiles::ExternalHtml;
+
 #[deriving(Clone)]
 pub struct Layout {
-    logo: ~str,
-    favicon: ~str,
-    crate: ~str,
+    pub logo: String,
+    pub favicon: String,
+    pub external_html: ExternalHtml,
+    pub krate: String,
+    pub playground_url: String,
 }
 
 pub struct Page<'a> {
-    title: &'a str,
-    ty: &'a str,
-    root_path: &'a str,
+    pub title: &'a str,
+    pub ty: &'a str,
+    pub root_path: &'a str,
 }
 
-pub fn render<T: fmt::Default, S: fmt::Default>(
+pub fn render<T: fmt::Show, S: fmt::Show>(
     dst: &mut io::Writer, layout: &Layout, page: &Page, sidebar: &S, t: &T)
+    -> io::IoResult<()>
 {
     write!(dst,
-"<!DOCTYPE html>
-<html lang=\"en\">
+r##"<!DOCTYPE html>
+<html lang="en">
 <head>
-    <meta charset=\"utf-8\" />
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="The {krate} library documentation.">
+
     <title>{title}</title>
 
-    <link href='http://fonts.googleapis.com/css?family=Oswald:700|Inconsolata:400'
-          rel='stylesheet' type='text/css'>
-    <link rel=\"stylesheet\" type=\"text/css\" href=\"{root_path}{crate}/main.css\">
+    <link rel="stylesheet" type="text/css" href="{root_path}main.css">
 
-    {favicon, select, none{} other{<link rel=\"shortcut icon\" href=\"#\" />}}
+    {favicon}
+    {in_header}
 </head>
 <body>
     <!--[if lte IE 8]>
-    <div class=\"warning\">
+    <div class="warning">
         This old browser is unsupported and will most likely display funky
         things.
     </div>
     <![endif]-->
 
-    <section class=\"sidebar\">
-        {logo, select, none{} other{
-            <a href='{root_path}{crate}/index.html'><img src='#' alt=''/></a>
-        }}
+    {before_content}
 
+    <section class="sidebar">
+        {logo}
         {sidebar}
     </section>
 
-    <nav class=\"sub\">
-        <form class=\"search-form js-only\">
-            <button class=\"do-search\">Search</button>
-            <div class=\"search-container\">
-                <input class=\"search-input\" name=\"search\"
-                       autocomplete=\"off\"
-                       placeholder=\"Search documentation...\"
-                       type=\"search\" />
+    <nav class="sub">
+        <form class="search-form js-only">
+            <div class="search-container">
+                <input class="search-input" name="search"
+                       autocomplete="off"
+                       placeholder="Click or press 'S' to search, '?' for more options..."
+                       type="search">
             </div>
         </form>
     </nav>
 
-    <section id='main' class=\"content {ty}\">{content}</section>
-    <section id='search' class=\"content hidden\"></section>
+    <section id='main' class="content {ty}">{content}</section>
+    <section id='search' class="content hidden"></section>
 
-    <section class=\"footer\"></section>
+    <section class="footer"></section>
 
-    <script>
-        var rootPath = \"{root_path}\";
-    </script>
-    <script src=\"{root_path}{crate}/jquery.js\"></script>
-    <script src=\"{root_path}{crate}/search-index.js\"></script>
-    <script src=\"{root_path}{crate}/main.js\"></script>
-
-    <div id=\"help\" class=\"hidden\">
-        <div class=\"shortcuts\">
+    <div id="help" class="hidden">
+        <div class="shortcuts">
             <h1>Keyboard shortcuts</h1>
             <dl>
                 <dt>?</dt>
                 <dd>Show this help dialog</dd>
                 <dt>S</dt>
                 <dd>Focus the search field</dd>
-                <dt>&uarr;</dt>
+                <dt>&larrb;</dt>
                 <dd>Move up in search results</dd>
-                <dt>&darr;</dt>
+                <dt>&rarrb;</dt>
                 <dd>Move down in search results</dd>
-                <dt>&\\#9166;</dt>
+                <dt>&#9166;</dt>
                 <dd>Go to active search result</dd>
             </dl>
         </div>
-        <div class=\"infos\">
+        <div class="infos">
             <h1>Search tricks</h1>
             <p>
                 Prefix searches with a type followed by a colon (e.g.
@@ -110,20 +108,61 @@ pub fn render<T: fmt::Default, S: fmt::Default>(
             </p>
         </div>
     </div>
+
+    {after_content}
+
+    <script>
+        window.rootPath = "{root_path}";
+        window.currentCrate = "{krate}";
+        window.playgroundUrl = "{play_url}";
+    </script>
+    <script src="{root_path}jquery.js"></script>
+    <script src="{root_path}main.js"></script>
+    {play_js}
+    <script async src="{root_path}search-index.js"></script>
 </body>
-</html>
-",
+</html>"##,
     content   = *t,
     root_path = page.root_path,
     ty        = page.ty,
-    logo      = nonestr(layout.logo),
+    logo      = if layout.logo.len() == 0 {
+        "".to_string()
+    } else {
+        format!("<a href='{}{}/index.html'>\
+                 <img src='{}' alt='' width='100'></a>",
+                page.root_path, layout.krate,
+                layout.logo)
+    },
     title     = page.title,
-    favicon   = nonestr(layout.favicon),
+    favicon   = if layout.favicon.len() == 0 {
+        "".to_string()
+    } else {
+        format!(r#"<link rel="shortcut icon" href="{}">"#, layout.favicon)
+    },
+    in_header = layout.external_html.in_header,
+    before_content = layout.external_html.before_content,
+    after_content = layout.external_html.after_content,
     sidebar   = *sidebar,
-    crate     = layout.crate,
-    );
+    krate     = layout.krate,
+    play_url  = layout.playground_url,
+    play_js   = if layout.playground_url.len() == 0 {
+        "".to_string()
+    } else {
+        format!(r#"<script src="{}playpen.js"></script>"#, page.root_path)
+    },
+    )
 }
 
-fn nonestr<'a>(s: &'a str) -> &'a str {
-    if s == "" { "none" } else { s }
+pub fn redirect(dst: &mut io::Writer, url: &str) -> io::IoResult<()> {
+    write!(dst,
+r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta http-equiv="refresh" content="0;URL={url}">
+</head>
+<body>
+</body>
+</html>"##,
+    url = url,
+    )
 }

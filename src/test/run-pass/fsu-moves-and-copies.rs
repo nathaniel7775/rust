@@ -11,19 +11,19 @@
 // Issue 4691: Ensure that functional-struct-updates operates
 // correctly and moves rather than copy when appropriate.
 
-use NC = std::util::NonCopyable;
+use NP = std::kinds::marker::NoCopy;
 
-struct ncint { nc: NC, v: int }
-fn ncint(v: int) -> ncint { ncint { nc: NC, v: v } }
+struct ncint { np: NP, v: int }
+fn ncint(v: int) -> ncint { ncint { np: NP, v: v } }
 
-struct NoFoo { copied: int, noncopy: ncint, }
+struct NoFoo { copied: int, nocopy: ncint, }
 impl NoFoo {
-    fn new(x:int,y:int) -> NoFoo { NoFoo { copied: x, noncopy: ncint(y) } }
+    fn new(x:int,y:int) -> NoFoo { NoFoo { copied: x, nocopy: ncint(y) } }
 }
 
-struct MoveFoo { copied: int, moved: ~int, }
+struct MoveFoo { copied: int, moved: Box<int>, }
 impl MoveFoo {
-    fn new(x:int,y:int) -> MoveFoo { MoveFoo { copied: x, moved: ~y } }
+    fn new(x:int,y:int) -> MoveFoo { MoveFoo { copied: x, moved: box y } }
 }
 
 struct DropNoFoo { inner: NoFoo }
@@ -44,23 +44,23 @@ fn test0() {
     // (and thus it is okay that these are Drop; compare against
     // compile-fail test: borrowck-struct-update-with-dtor.rs).
 
-    // Case 1: NonCopyable
+    // Case 1: Nocopyable
     let f = DropNoFoo::new(1, 2);
-    let b = DropNoFoo { inner: NoFoo { noncopy: ncint(3), ..f.inner }};
-    let c = DropNoFoo { inner: NoFoo { noncopy: ncint(4), ..f.inner }};
+    let b = DropNoFoo { inner: NoFoo { nocopy: ncint(3), ..f.inner }};
+    let c = DropNoFoo { inner: NoFoo { nocopy: ncint(4), ..f.inner }};
     assert_eq!(f.inner.copied,    1);
-    assert_eq!(f.inner.noncopy.v, 2);
+    assert_eq!(f.inner.nocopy.v, 2);
 
     assert_eq!(b.inner.copied,    1);
-    assert_eq!(b.inner.noncopy.v, 3);
+    assert_eq!(b.inner.nocopy.v, 3);
 
     assert_eq!(c.inner.copied,    1);
-    assert_eq!(c.inner.noncopy.v, 4);
+    assert_eq!(c.inner.nocopy.v, 4);
 
     // Case 2: Owned
     let f = DropMoveFoo::new(5, 6);
-    let b = DropMoveFoo { inner: MoveFoo { moved: ~7, ..f.inner }};
-    let c = DropMoveFoo { inner: MoveFoo { moved: ~8, ..f.inner }};
+    let b = DropMoveFoo { inner: MoveFoo { moved: box 7, ..f.inner }};
+    let c = DropMoveFoo { inner: MoveFoo { moved: box 8, ..f.inner }};
     assert_eq!(f.inner.copied,    5);
     assert_eq!(*f.inner.moved,    6);
 
@@ -75,7 +75,7 @@ fn test1() {
     // copying move-by-default fields from `f`, so it moves:
     let f = MoveFoo::new(11, 12);
 
-    let b = MoveFoo {moved: ~13, ..f};
+    let b = MoveFoo {moved: box 13, ..f};
     let c = MoveFoo {copied: 14, ..f};
     assert_eq!(b.copied,    11);
     assert_eq!(*b.moved,    13);
@@ -86,12 +86,12 @@ fn test1() {
 fn test2() {
     // move non-copyable field
     let f = NoFoo::new(21, 22);
-    let b = NoFoo {noncopy: ncint(23), ..f};
+    let b = NoFoo {nocopy: ncint(23), ..f};
     let c = NoFoo {copied: 24, ..f};
     assert_eq!(b.copied,    21);
-    assert_eq!(b.noncopy.v, 23);
+    assert_eq!(b.nocopy.v, 23);
     assert_eq!(c.copied,    24);
-    assert_eq!(c.noncopy.v, 22);
+    assert_eq!(c.nocopy.v, 22);
 }
 
 pub fn main() {

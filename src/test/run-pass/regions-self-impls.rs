@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+extern crate debug;
+
 struct Clam<'a> {
     chowder: &'a int
 }
@@ -22,6 +24,6 @@ impl<'a> get_chowder<'a> for Clam<'a> {
 
 pub fn main() {
     let clam = Clam { chowder: &3 };
-    info!("{:?}", *clam.get_chowder());
+    println!("{:?}", *clam.get_chowder());
     clam.get_chowder();
 }

@@ -20,28 +20,29 @@
 //! Other than that, the implementation is pretty straightforward in terms of
 //! the other two implementations of timers with nothing *that* new showing up.
 
-use std::comm::Data;
-use std::libc;
+use libc;
 use std::ptr;
 use std::rt::rtio;
+use std::rt::rtio::{IoResult, Callback};
+use std::comm;
 
-use io::timer_helper;
-use io::IoResult;
+use io::helper_thread::Helper;
+
+helper_init!(static mut HELPER: Helper<Req>)
 
 pub struct Timer {
-    priv obj: libc::HANDLE,
-    priv on_worker: bool,
+    obj: libc::HANDLE,
+    on_worker: bool,
 }
 
 pub enum Req {
-    NewTimer(libc::HANDLE, Chan<()>, bool),
-    RemoveTimer(libc::HANDLE, Chan<()>),
-    Shutdown,
+    NewTimer(libc::HANDLE, Box<Callback + Send>, bool),
+    RemoveTimer(libc::HANDLE, Sender<()>),
 }
 
-fn helper(input: libc::HANDLE, messages: Port<Req>) {
-    let mut objs = ~[input];
-    let mut chans = ~[];
+fn helper(input: libc::HANDLE, messages: Receiver<Req>, _: ()) {
+    let mut objs = vec![input];
+    let mut chans = vec![];
 
     'outer: loop {
         let idx = unsafe {
@@ -54,45 +55,56 @@ fn helper(input: libc::HANDLE, messages: Port<Req>) {
         if idx == 0 {
             loop {
                 match messages.try_recv() {
-                    Data(NewTimer(obj, c, one)) => {
+                    Ok(NewTimer(obj, c, one)) => {
                         objs.push(obj);
                         chans.push((c, one));
                     }
-                    Data(RemoveTimer(obj, c)) => {
+                    Ok(RemoveTimer(obj, c)) => {
                         c.send(());
                         match objs.iter().position(|&o| o == obj) {
                             Some(i) => {
-                                objs.remove(i);
-                                chans.remove(i - 1);
+                                drop(objs.remove(i));
+                                drop(chans.remove(i - 1));
                             }
                             None => {}
                         }
                     }
-                    Data(Shutdown) => {
+                    Err(comm::Disconnected) => {
                         assert_eq!(objs.len(), 1);
                         assert_eq!(chans.len(), 0);
                         break 'outer;
                     }
-                    _ => break
+                    Err(..) => break
                 }
             }
         } else {
             let remove = {
-                match &chans[idx - 1] {
-                    &(ref c, oneshot) => !c.try_send(()) || oneshot
+                match chans.get_mut(idx as uint - 1) {
+                    &(ref mut c, oneshot) => { c.call(); oneshot }
                 }
             };
             if remove {
-                objs.remove(idx as uint);
-                chans.remove(idx as uint - 1);
+                drop(objs.remove(idx as uint));
+                drop(chans.remove(idx as uint - 1));
             }
         }
     }
 }
 
+// returns the current time (in milliseconds)
+pub fn now() -> u64 {
+    let mut ticks_per_s = 0;
+    assert_eq!(unsafe { libc::QueryPerformanceFrequency(&mut ticks_per_s) }, 1);
+    let ticks_per_s = if ticks_per_s == 0 {1} else {ticks_per_s};
+    let mut ticks = 0;
+    assert_eq!(unsafe { libc::QueryPerformanceCounter(&mut ticks) }, 1);
+
+    return (ticks as u64 * 1000) / (ticks_per_s as u64);
+}
+
 impl Timer {
     pub fn new() -> IoResult<Timer> {
-        timer_helper::boot(helper);
+        unsafe { HELPER.boot(|| {}, helper) }
 
         let obj = unsafe {
             imp::CreateWaitableTimerA(ptr::mut_null(), 0, ptr::null())
@@ -113,9 +125,9 @@ impl Timer {
     fn remove(&mut self) {
         if !self.on_worker { return }
 
-        let (p, c) = Chan::new();
-        timer_helper::send(RemoveTimer(self.obj, c));
-        p.recv();
+        let (tx, rx) = channel();
+        unsafe { HELPER.send(RemoveTimer(self.obj, tx)) }
+        rx.recv();
 
         self.on_worker = false;
     }
@@ -127,74 +139,69 @@ impl rtio::RtioTimer for Timer {
 
         // there are 10^6 nanoseconds in a millisecond, and the parameter is in
         // 100ns intervals, so we multiply by 10^4.
-        let due = -(msecs * 10000) as libc::LARGE_INTEGER;
+        let due = -(msecs as i64 * 10000) as libc::LARGE_INTEGER;
         assert_eq!(unsafe {
-            imp::SetWaitableTimer(self.obj, &due, 0, ptr::null(),
+            imp::SetWaitableTimer(self.obj, &due, 0, ptr::mut_null(),
                                   ptr::mut_null(), 0)
         }, 1);
 
-        unsafe { imp::WaitForSingleObject(self.obj, libc::INFINITE); }
+        let _ = unsafe { imp::WaitForSingleObject(self.obj, libc::INFINITE) };
     }
 
-    fn oneshot(&mut self, msecs: u64) -> Port<()> {
+    fn oneshot(&mut self, msecs: u64, cb: Box<Callback + Send>) {
         self.remove();
-        let (p, c) = Chan::new();
 
         // see above for the calculation
-        let due = -(msecs * 10000) as libc::LARGE_INTEGER;
+        let due = -(msecs as i64 * 10000) as libc::LARGE_INTEGER;
         assert_eq!(unsafe {
-            imp::SetWaitableTimer(self.obj, &due, 0, ptr::null(),
+            imp::SetWaitableTimer(self.obj, &due, 0, ptr::mut_null(),
                                   ptr::mut_null(), 0)
         }, 1);
 
-        timer_helper::send(NewTimer(self.obj, c, true));
+        unsafe { HELPER.send(NewTimer(self.obj, cb, true)) }
         self.on_worker = true;
-        return p;
     }
 
-    fn period(&mut self, msecs: u64) -> Port<()> {
+    fn period(&mut self, msecs: u64, cb: Box<Callback + Send>) {
         self.remove();
-        let (p, c) = Chan::new();
 
         // see above for the calculation
-        let due = -(msecs * 10000) as libc::LARGE_INTEGER;
+        let due = -(msecs as i64 * 10000) as libc::LARGE_INTEGER;
         assert_eq!(unsafe {
             imp::SetWaitableTimer(self.obj, &due, msecs as libc::LONG,
-                                  ptr::null(), ptr::mut_null(), 0)
+                                  ptr::mut_null(), ptr::mut_null(), 0)
         }, 1);
 
-        timer_helper::send(NewTimer(self.obj, c, false));
+        unsafe { HELPER.send(NewTimer(self.obj, cb, false)) }
         self.on_worker = true;
-
-        return p;
     }
 }
 
 impl Drop for Timer {
     fn drop(&mut self) {
         self.remove();
-        unsafe { libc::CloseHandle(self.obj); }
+        assert!(unsafe { libc::CloseHandle(self.obj) != 0 });
     }
 }
 
 mod imp {
-    use std::libc::{LPSECURITY_ATTRIBUTES, BOOL, LPCSTR, HANDLE, LARGE_INTEGER,
+    use libc::{LPSECURITY_ATTRIBUTES, BOOL, LPCSTR, HANDLE, LARGE_INTEGER,
                     LONG, LPVOID, DWORD, c_void};
 
-    pub type PTIMERAPCROUTINE = *c_void;
+    pub type PTIMERAPCROUTINE = *mut c_void;
 
     extern "system" {
         pub fn CreateWaitableTimerA(lpTimerAttributes: LPSECURITY_ATTRIBUTES,
                                     bManualReset: BOOL,
                                     lpTimerName: LPCSTR) -> HANDLE;
         pub fn SetWaitableTimer(hTimer: HANDLE,
-                                pDueTime: *LARGE_INTEGER,
+                                pDueTime: *const LARGE_INTEGER,
                                 lPeriod: LONG,
                                 pfnCompletionRoutine: PTIMERAPCROUTINE,
                                 lpArgToCompletionRoutine: LPVOID,
                                 fResume: BOOL) -> BOOL;
         pub fn WaitForMultipleObjects(nCount: DWORD,
-                                      lpHandles: *HANDLE,
+                                      lpHandles: *const HANDLE,
                                       bWaitAll: BOOL,
                                       dwMilliseconds: DWORD) -> DWORD;
         pub fn WaitForSingleObject(hHandle: HANDLE,

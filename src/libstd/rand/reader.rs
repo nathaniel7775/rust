@@ -10,11 +10,10 @@
 
 //! A wrapper around any Reader to treat it as an RNG.
 
-use container::Container;
-use option::{Some, None};
+use collections::Collection;
 use io::Reader;
-
 use rand::Rng;
+use result::{Ok, Err};
 
 /// An RNG that reads random bytes straight from a `Reader`. This will
 /// work best with an infinite reader, but this is not required.
@@ -27,11 +26,11 @@ use rand::Rng;
 /// use std::rand::{reader, Rng};
 /// use std::io::MemReader;
 ///
-/// let mut rng = reader::ReaderRng::new(MemReader::new(~[1,2,3,4,5,6,7,8]));
+/// let mut rng = reader::ReaderRng::new(MemReader::new(vec!(1,2,3,4,5,6,7,8)));
 /// println!("{:x}", rng.gen::<uint>());
 /// ```
 pub struct ReaderRng<R> {
-    priv reader: R
+    reader: R
 }
 
 impl<R: Reader> ReaderRng<R> {
@@ -49,75 +48,73 @@ impl<R: Reader> Rng for ReaderRng<R> {
         // platform just involves blitting the bytes into the memory
         // of the u32, similarly for BE on BE; avoiding byteswapping.
         if cfg!(target_endian="little") {
-            self.reader.read_le_u32()
+            self.reader.read_le_u32().unwrap()
         } else {
-            self.reader.read_be_u32()
+            self.reader.read_be_u32().unwrap()
         }
     }
     fn next_u64(&mut self) -> u64 {
         // see above for explanation.
         if cfg!(target_endian="little") {
-            self.reader.read_le_u64()
+            self.reader.read_le_u64().unwrap()
         } else {
-            self.reader.read_be_u64()
+            self.reader.read_be_u64().unwrap()
         }
     }
     fn fill_bytes(&mut self, v: &mut [u8]) {
         if v.len() == 0 { return }
-        match self.reader.read(v) {
-            Some(n) if n == v.len() => return,
-            Some(n) => fail!("ReaderRng.fill_bytes could not fill buffer: \
-                              read {} out of {} bytes.", n, v.len()),
-            None => fail!("ReaderRng.fill_bytes reached eof.")
+        match self.reader.read_at_least(v.len(), v) {
+            Ok(_) => {}
+            Err(e) => fail!("ReaderRng.fill_bytes error: {}", e)
         }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use io::MemReader;
-    use cast;
-    use rand::*;
     use prelude::*;
+
+    use super::ReaderRng;
+    use io::MemReader;
+    use mem;
+    use rand::Rng;
 
     #[test]
     fn test_reader_rng_u64() {
         // transmute from the target to avoid endianness concerns.
-        let v = ~[1u64, 2u64, 3u64];
-        let bytes: ~[u8] = unsafe {cast::transmute(v)};
-        let mut rng = ReaderRng::new(MemReader::new(bytes));
+        let v = vec![0u8, 0, 0, 0, 0, 0, 0, 1,
+                     0  , 0, 0, 0, 0, 0, 0, 2,
+                     0,   0, 0, 0, 0, 0, 0, 3];
+        let mut rng = ReaderRng::new(MemReader::new(v));
 
-        assert_eq!(rng.next_u64(), 1);
-        assert_eq!(rng.next_u64(), 2);
-        assert_eq!(rng.next_u64(), 3);
+        assert_eq!(rng.next_u64(), mem::to_be64(1));
+        assert_eq!(rng.next_u64(), mem::to_be64(2));
+        assert_eq!(rng.next_u64(), mem::to_be64(3));
     }
     #[test]
     fn test_reader_rng_u32() {
-        // transmute from the target to avoid endianness concerns.
-        let v = ~[1u32, 2u32, 3u32];
-        let bytes: ~[u8] = unsafe {cast::transmute(v)};
-        let mut rng = ReaderRng::new(MemReader::new(bytes));
+        let v = vec![0u8, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3];
+        let mut rng = ReaderRng::new(MemReader::new(v));
 
-        assert_eq!(rng.next_u32(), 1);
-        assert_eq!(rng.next_u32(), 2);
-        assert_eq!(rng.next_u32(), 3);
+        assert_eq!(rng.next_u32(), mem::to_be32(1));
+        assert_eq!(rng.next_u32(), mem::to_be32(2));
+        assert_eq!(rng.next_u32(), mem::to_be32(3));
     }
     #[test]
     fn test_reader_rng_fill_bytes() {
         let v = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let mut w = [0u8, .. 8];
 
-        let mut rng = ReaderRng::new(MemReader::new(v.to_owned()));
+        let mut rng = ReaderRng::new(MemReader::new(Vec::from_slice(v)));
         rng.fill_bytes(w);
 
-        assert_eq!(v, w);
+        assert!(v == w);
     }
 
     #[test]
     #[should_fail]
     fn test_reader_rng_insufficient_bytes() {
-        let mut rng = ReaderRng::new(MemReader::new(~[]));
+        let mut rng = ReaderRng::new(MemReader::new(vec!()));
         let mut v = [0u8, .. 3];
         rng.fill_bytes(v);
     }

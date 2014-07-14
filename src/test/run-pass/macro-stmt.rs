@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-pretty - token trees can't pretty print
+// ignore-pretty - token trees can't pretty print
 
-#[feature(macro_rules)];
+#![feature(macro_rules)]
 
 macro_rules! myfn(
     ( $f:ident, ( $( $x:ident ),* ), $body:block ) => (
@@ -28,17 +28,17 @@ pub fn main() {
         )
     );
 
-    mylet!(y, 8*2);
-    assert_eq!(y, 16);
+    mylet!(y, 8i*2);
+    assert_eq!(y, 16i);
 
     myfn!(mult, (a,b), { a*b } );
 
     assert_eq!(mult(2, add(4,4)), 16);
 
     macro_rules! actually_an_expr_macro (
-        () => ( 16 )
+        () => ( 16i )
     )
 
-    assert_eq!({ actually_an_expr_macro!() }, 16);
+    assert_eq!({ actually_an_expr_macro!() }, 16i);
 
 }

@@ -10,27 +10,30 @@
 
 // error-pattern:fail
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
-use std::cast;
+extern crate debug;
+
+use std::mem;
+use std::gc::GC;
 
 fn failfn() {
     fail!();
 }
 
 struct r {
-  v: *int,
+  v: *const int,
 }
 
 impl Drop for r {
     fn drop(&mut self) {
         unsafe {
-            let _v2: ~int = cast::transmute(self.v);
+            let _v2: Box<int> = mem::transmute(self.v);
         }
     }
 }
 
-fn r(v: *int) -> r {
+fn r(v: *const int) -> r {
     r {
         v: v
     }
@@ -38,11 +41,11 @@ fn r(v: *int) -> r {
 
 fn main() {
     unsafe {
-        let i1 = ~0;
-        let i1p = cast::transmute_copy(&i1);
-        cast::forget(i1);
-        let x = @r(i1p);
+        let i1 = box 0i;
+        let i1p = mem::transmute_copy(&i1);
+        mem::forget(i1);
+        let x = box(GC) r(i1p);
         failfn();
-        error!("{:?}", x);
+        println!("{:?}", x);
     }
 }

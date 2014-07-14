@@ -10,7 +10,7 @@
 
 // FIXME: this file probably shouldn't exist
 
-#[macro_escape];
+#![macro_escape]
 
 use std::fmt;
 
@@ -46,26 +46,14 @@ macro_rules! rtassert (
 
 macro_rules! rtabort (
     ($($arg:tt)*) => ( {
-        ::macros::abort(format!($($arg)*));
+        ::macros::abort(format!($($arg)*).as_slice());
     } )
 )
 
 pub fn dumb_println(args: &fmt::Arguments) {
-    use std::io;
-    use std::libc;
-
-    struct Stderr;
-    impl io::Writer for Stderr {
-        fn write(&mut self, data: &[u8]) {
-            unsafe {
-                libc::write(libc::STDERR_FILENO,
-                            data.as_ptr() as *libc::c_void,
-                            data.len() as libc::size_t);
-            }
-        }
-    }
-    let mut w = Stderr;
-    fmt::writeln(&mut w as &mut io::Writer, args);
+    use std::rt;
+    let mut w = rt::Stderr;
+    let _ = writeln!(&mut w, "{}", args);
 }
 
 pub fn abort(msg: &str) -> ! {
@@ -123,7 +111,7 @@ memory and partly incapable of presentation to others.",
     abort();
 
     fn abort() -> ! {
-        use std::unstable::intrinsics;
+        use std::intrinsics;
         unsafe { intrinsics::abort() }
     }
 }

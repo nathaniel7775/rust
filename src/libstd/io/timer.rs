@@ -13,42 +13,66 @@
 Synchronous Timers
 
 This module exposes the functionality to create timers, block the current task,
-and create ports which will receive notifications after a period of time.
-
-# Example
-
-```rust,ignore
-
-use std::io::Timer;
-
-let mut timer = Timer::new().unwrap();
-timer.sleep(10); // block the task for awhile
-
-let timeout = timer.oneshot(10);
-// do some work
-timeout.recv(); // wait for the timeout to expire
-
-let periodic = timer.periodic(10);
-loop {
-    periodic.recv();
-    // this loop is only executed once every 10ms
-}
-
-```
+and create receivers which will receive notifications after a period of time.
 
 */
 
-use comm::Port;
-use option::Option;
-use rt::rtio::{IoFactory, LocalIo, RtioTimer};
+use comm::{Receiver, Sender, channel};
+use io::{IoResult, IoError};
+use kinds::Send;
+use boxed::Box;
+use rt::rtio::{IoFactory, LocalIo, RtioTimer, Callback};
 
+/// A synchronous timer object
+///
+/// Values of this type can be used to put the current task to sleep for a
+/// period of time. Handles to this timer can also be created in the form of
+/// receivers which will receive notifications over time.
+///
+/// # Example
+///
+/// ```
+/// # fn main() {}
+/// # fn foo() {
+/// use std::io::Timer;
+///
+/// let mut timer = Timer::new().unwrap();
+/// timer.sleep(10); // block the task for awhile
+///
+/// let timeout = timer.oneshot(10);
+/// // do some work
+/// timeout.recv(); // wait for the timeout to expire
+///
+/// let periodic = timer.periodic(10);
+/// loop {
+///     periodic.recv();
+///     // this loop is only executed once every 10ms
+/// }
+/// # }
+/// ```
+///
+/// If only sleeping is necessary, then a convenience API is provided through
+/// the `io::timer` module.
+///
+/// ```
+/// # fn main() {}
+/// # fn foo() {
+/// use std::io::timer;
+///
+/// // Put this task to sleep for 5 seconds
+/// timer::sleep(5000);
+/// # }
+/// ```
 pub struct Timer {
-    priv obj: ~RtioTimer
+    obj: Box<RtioTimer + Send>,
 }
+
+struct TimerCallback { tx: Sender<()> }
 
 /// Sleep the current task for `msecs` milliseconds.
 pub fn sleep(msecs: u64) {
-    let mut timer = Timer::new().expect("timer::sleep: could not create a Timer");
+    let timer = Timer::new();
+    let mut timer = timer.ok().expect("timer::sleep: could not create a Timer");
 
     timer.sleep(msecs)
 }
@@ -57,40 +81,112 @@ impl Timer {
     /// Creates a new timer which can be used to put the current task to sleep
     /// for a number of milliseconds, or to possibly create channels which will
     /// get notified after an amount of time has passed.
-    pub fn new() -> Option<Timer> {
-        LocalIo::maybe_raise(|io| io.timer_init().map(|t| Timer { obj: t }))
+    pub fn new() -> IoResult<Timer> {
+        LocalIo::maybe_raise(|io| {
+            io.timer_init().map(|t| Timer { obj: t })
+        }).map_err(IoError::from_rtio_error)
     }
 
     /// Blocks the current task for `msecs` milliseconds.
     ///
-    /// Note that this function will cause any other ports for this timer to be
-    /// invalidated (the other end will be closed).
+    /// Note that this function will cause any other receivers for this timer to
+    /// be invalidated (the other end will be closed).
     pub fn sleep(&mut self, msecs: u64) {
         self.obj.sleep(msecs);
     }
 
-    /// Creates a oneshot port which will have a notification sent when `msecs`
-    /// milliseconds has elapsed. This does *not* block the current task, but
-    /// instead returns immediately.
+    /// Creates a oneshot receiver which will have a notification sent when
+    /// `msecs` milliseconds has elapsed.
     ///
-    /// Note that this invalidates any previous port which has been created by
-    /// this timer, and that the returned port will be invalidated once the
-    /// timer is destroyed (when it falls out of scope).
-    pub fn oneshot(&mut self, msecs: u64) -> Port<()> {
-        self.obj.oneshot(msecs)
+    /// This does *not* block the current task, but instead returns immediately.
+    ///
+    /// Note that this invalidates any previous receiver which has been created
+    /// by this timer, and that the returned receiver will be invalidated once
+    /// the timer is destroyed (when it falls out of scope). In particular, if
+    /// this is called in method-chaining style, the receiver will be
+    /// invalidated at the end of that statement, and all `recv` calls will
+    /// fail.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::io::Timer;
+    ///
+    /// let mut timer = Timer::new().unwrap();
+    /// let ten_milliseconds = timer.oneshot(10);
+    ///
+    /// for _ in range(0u, 100) { /* do work */ }
+    ///
+    /// // blocks until 10 ms after the `oneshot` call
+    /// ten_milliseconds.recv();
+    /// ```
+    ///
+    /// ```rust
+    /// use std::io::Timer;
+    ///
+    /// // Incorrect, method chaining-style:
+    /// let mut five_ms = Timer::new().unwrap().oneshot(5);
+    /// // The timer object was destroyed, so this will always fail:
+    /// // five_ms.recv()
+    /// ```
+    pub fn oneshot(&mut self, msecs: u64) -> Receiver<()> {
+        let (tx, rx) = channel();
+        self.obj.oneshot(msecs, box TimerCallback { tx: tx });
+        return rx
     }
 
-    /// Creates a port which will have a continuous stream of notifications
-    /// being sent every `msecs` milliseconds. This does *not* block the
-    /// current task, but instead returns immediately. The first notification
-    /// will not be received immediately, but rather after `msec` milliseconds
-    /// have passed.
+    /// Creates a receiver which will have a continuous stream of notifications
+    /// being sent every `msecs` milliseconds.
     ///
-    /// Note that this invalidates any previous port which has been created by
-    /// this timer, and that the returned port will be invalidated once the
-    /// timer is destroyed (when it falls out of scope).
-    pub fn periodic(&mut self, msecs: u64) -> Port<()> {
-        self.obj.period(msecs)
+    /// This does *not* block the current task, but instead returns
+    /// immediately. The first notification will not be received immediately,
+    /// but rather after `msec` milliseconds have passed.
+    ///
+    /// Note that this invalidates any previous receiver which has been created
+    /// by this timer, and that the returned receiver will be invalidated once
+    /// the timer is destroyed (when it falls out of scope). In particular, if
+    /// this is called in method-chaining style, the receiver will be
+    /// invalidated at the end of that statement, and all `recv` calls will
+    /// fail.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::io::Timer;
+    ///
+    /// let mut timer = Timer::new().unwrap();
+    /// let ten_milliseconds = timer.periodic(10);
+    ///
+    /// for _ in range(0u, 100) { /* do work */ }
+    ///
+    /// // blocks until 10 ms after the `periodic` call
+    /// ten_milliseconds.recv();
+    ///
+    /// for _ in range(0u, 100) { /* do work */ }
+    ///
+    /// // blocks until 20 ms after the `periodic` call (*not* 10ms after the
+    /// // previous `recv`)
+    /// ten_milliseconds.recv();
+    /// ```
+    ///
+    /// ```rust
+    /// use std::io::Timer;
+    ///
+    /// // Incorrect, method chaining-style.
+    /// let mut five_ms = Timer::new().unwrap().periodic(5);
+    /// // The timer object was destroyed, so this will always fail:
+    /// // five_ms.recv()
+    /// ```
+    pub fn periodic(&mut self, msecs: u64) -> Receiver<()> {
+        let (tx, rx) = channel();
+        self.obj.period(msecs, box TimerCallback { tx: tx });
+        return rx
+    }
+}
+
+impl Callback for TimerCallback {
+    fn call(&mut self) {
+        let _ = self.tx.send_opt(());
     }
 }
 
@@ -113,26 +209,26 @@ mod test {
 
     iotest!(fn oneshot_twice() {
         let mut timer = Timer::new().unwrap();
-        let port1 = timer.oneshot(10000);
-        let port = timer.oneshot(1);
-        port.recv();
-        assert_eq!(port1.recv_opt(), None);
+        let rx1 = timer.oneshot(10000);
+        let rx = timer.oneshot(1);
+        rx.recv();
+        assert_eq!(rx1.recv_opt(), Err(()));
     })
 
     iotest!(fn test_io_timer_oneshot_then_sleep() {
         let mut timer = Timer::new().unwrap();
-        let port = timer.oneshot(100000000000);
-        timer.sleep(1); // this should invalidate the port
+        let rx = timer.oneshot(100000000000);
+        timer.sleep(1); // this should invalidate rx
 
-        assert_eq!(port.recv_opt(), None);
+        assert_eq!(rx.recv_opt(), Err(()));
     })
 
     iotest!(fn test_io_timer_sleep_periodic() {
         let mut timer = Timer::new().unwrap();
-        let port = timer.periodic(1);
-        port.recv();
-        port.recv();
-        port.recv();
+        let rx = timer.periodic(1);
+        rx.recv();
+        rx.recv();
+        rx.recv();
     })
 
     iotest!(fn test_io_timer_sleep_periodic_forget() {
@@ -147,33 +243,33 @@ mod test {
     iotest!(fn oneshot() {
         let mut timer = Timer::new().unwrap();
 
-        let port = timer.oneshot(1);
-        port.recv();
-        assert!(port.recv_opt().is_none());
+        let rx = timer.oneshot(1);
+        rx.recv();
+        assert!(rx.recv_opt().is_err());
 
-        let port = timer.oneshot(1);
-        port.recv();
-        assert!(port.recv_opt().is_none());
+        let rx = timer.oneshot(1);
+        rx.recv();
+        assert!(rx.recv_opt().is_err());
     })
 
     iotest!(fn override() {
         let mut timer = Timer::new().unwrap();
-        let oport = timer.oneshot(100);
-        let pport = timer.periodic(100);
+        let orx = timer.oneshot(100);
+        let prx = timer.periodic(100);
         timer.sleep(1);
-        assert_eq!(oport.recv_opt(), None);
-        assert_eq!(pport.recv_opt(), None);
+        assert_eq!(orx.recv_opt(), Err(()));
+        assert_eq!(prx.recv_opt(), Err(()));
         timer.oneshot(1).recv();
     })
 
     iotest!(fn period() {
         let mut timer = Timer::new().unwrap();
-        let port = timer.periodic(1);
-        port.recv();
-        port.recv();
-        let port2 = timer.periodic(1);
-        port2.recv();
-        port2.recv();
+        let rx = timer.periodic(1);
+        rx.recv();
+        rx.recv();
+        let rx2 = timer.periodic(1);
+        rx2.recv();
+        rx2.recv();
     })
 
     iotest!(fn sleep() {
@@ -184,13 +280,13 @@ mod test {
 
     iotest!(fn oneshot_fail() {
         let mut timer = Timer::new().unwrap();
-        let _port = timer.oneshot(1);
+        let _rx = timer.oneshot(1);
         fail!();
     } #[should_fail])
 
     iotest!(fn period_fail() {
         let mut timer = Timer::new().unwrap();
-        let _port = timer.periodic(1);
+        let _rx = timer.periodic(1);
         fail!();
     } #[should_fail])
 
@@ -202,10 +298,10 @@ mod test {
     iotest!(fn closing_channel_during_drop_doesnt_kill_everything() {
         // see issue #10375
         let mut timer = Timer::new().unwrap();
-        let timer_port = timer.periodic(1000);
+        let timer_rx = timer.periodic(1000);
 
         spawn(proc() {
-            timer_port.recv_opt();
+            let _ = timer_rx.recv_opt();
         });
 
         // when we drop the TimerWatcher we're going to destroy the channel,
@@ -215,10 +311,10 @@ mod test {
     iotest!(fn reset_doesnt_switch_tasks() {
         // similar test to the one above.
         let mut timer = Timer::new().unwrap();
-        let timer_port = timer.periodic(1000);
+        let timer_rx = timer.periodic(1000);
 
         spawn(proc() {
-            timer_port.recv_opt();
+            let _ = timer_rx.recv_opt();
         });
 
         timer.oneshot(1);
@@ -227,36 +323,36 @@ mod test {
     iotest!(fn reset_doesnt_switch_tasks2() {
         // similar test to the one above.
         let mut timer = Timer::new().unwrap();
-        let timer_port = timer.periodic(1000);
+        let timer_rx = timer.periodic(1000);
 
         spawn(proc() {
-            timer_port.recv_opt();
+            let _ = timer_rx.recv_opt();
         });
 
         timer.sleep(1);
     })
 
     iotest!(fn sender_goes_away_oneshot() {
-        let port = {
+        let rx = {
             let mut timer = Timer::new().unwrap();
             timer.oneshot(1000)
         };
-        assert_eq!(port.recv_opt(), None);
+        assert_eq!(rx.recv_opt(), Err(()));
     })
 
     iotest!(fn sender_goes_away_period() {
-        let port = {
+        let rx = {
             let mut timer = Timer::new().unwrap();
             timer.periodic(1000)
         };
-        assert_eq!(port.recv_opt(), None);
+        assert_eq!(rx.recv_opt(), Err(()));
     })
 
     iotest!(fn receiver_goes_away_oneshot() {
         let mut timer1 = Timer::new().unwrap();
         timer1.oneshot(1);
         let mut timer2 = Timer::new().unwrap();
-        // while sleeping, the prevous timer should fire and not have its
+        // while sleeping, the previous timer should fire and not have its
         // callback do something terrible.
         timer2.sleep(2);
     })
@@ -265,7 +361,7 @@ mod test {
         let mut timer1 = Timer::new().unwrap();
         timer1.periodic(1);
         let mut timer2 = Timer::new().unwrap();
-        // while sleeping, the prevous timer should fire and not have its
+        // while sleeping, the previous timer should fire and not have its
         // callback do something terrible.
         timer2.sleep(2);
     })

@@ -13,12 +13,13 @@ fn borrow(v: &int, f: |x: &int|) {
 }
 
 fn box_imm() {
-    let mut v = ~3;
-    borrow(v, |w| {
-        v = ~4; //~ ERROR cannot assign to `v` because it is borrowed
-        assert_eq!(*v, 3);
-        assert_eq!(*w, 4);
-    })
+    let mut v = box 3;
+    borrow(v,
+           |w| { //~ ERROR cannot borrow `v` as mutable
+            v = box 4;
+            assert_eq!(*v, 3);
+            assert_eq!(*w, 4);
+        })
 }
 
 fn main() {

@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,10 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-pretty -- comments are unfaithfully preserved
-
-#[allow(unused_variable)];
-#[allow(dead_assignment)];
+#![allow(unused_variable)]
+#![allow(dead_assignment)]
 
 fn cond() -> bool { fail!() }
 fn link<'a>(v: &'a uint, w: &mut &'a uint) -> bool { *w = v; true }
@@ -24,10 +22,10 @@ fn separate_arms() {
         None => {
             // It is ok to reassign x here, because there is in
             // fact no outstanding loan of x!
-            x = Some(0);
+            x = Some(0i);
         }
         Some(ref _i) => {
-            x = Some(1); //~ ERROR cannot assign
+            x = Some(1i); //~ ERROR cannot assign
         }
     }
     x.clone(); // just to prevent liveness warnings
@@ -37,24 +35,24 @@ fn guard() {
     // Here the guard performs a borrow. This borrow "infects" all
     // subsequent arms (but not the prior ones).
 
-    let mut a = ~3;
-    let mut b = ~4;
+    let mut a = box 3u;
+    let mut b = box 4u;
     let mut w = &*a;
-    match 22 {
+    match 22i {
         _ if cond() => {
-            b = ~5;
+            b = box 5u;
         }
 
         _ if link(&*b, &mut w) => {
-            b = ~6; //~ ERROR cannot assign
+            b = box 6u; //~ ERROR cannot assign
         }
 
         _ => {
-            b = ~7; //~ ERROR cannot assign
+            b = box 7u; //~ ERROR cannot assign
         }
     }
 
-    b = ~8; //~ ERROR cannot assign
+    b = box 8; //~ ERROR cannot assign
 }
 
 fn main() {}

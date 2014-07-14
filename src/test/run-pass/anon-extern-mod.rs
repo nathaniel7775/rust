@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::libc;
+extern crate libc;
 
-#[link(name = "rustrt")]
+#[link(name = "rust_test_helpers")]
 extern {
     fn rust_get_test_int() -> libc::intptr_t;
 }

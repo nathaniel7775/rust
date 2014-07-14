@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+extern crate debug;
+
 struct foo {
   i: int,
 }
@@ -26,5 +28,5 @@ fn main() {
     let x = foo(10);
     let _y = x.clone();
     //~^ ERROR does not implement any method in scope
-    error!("{:?}", x);
+    println!("{:?}", x);
 }

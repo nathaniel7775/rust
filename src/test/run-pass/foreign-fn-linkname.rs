@@ -8,28 +8,30 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
+// ignore-fast doesn't like extern crate
 
-mod libc {
-    use std::libc::{c_char, size_t};
+extern crate libc;
 
-    #[nolink]
+mod mlibc {
+    extern crate libc;
+    use self::libc::{c_char, size_t};
+
     extern {
         #[link_name = "strlen"]
-        pub fn my_strlen(str: *c_char) -> size_t;
+        pub fn my_strlen(str: *const c_char) -> size_t;
     }
 }
 
-fn strlen(str: ~str) -> uint {
+fn strlen(str: String) -> uint {
     // C string is terminated with a zero
-    str.with_c_str(|buf| {
+    str.as_slice().with_c_str(|buf| {
         unsafe {
-            libc::my_strlen(buf) as uint
+            mlibc::my_strlen(buf) as uint
         }
     })
 }
 
 pub fn main() {
-    let len = strlen(~"Rust");
+    let len = strlen("Rust".to_string());
     assert_eq!(len, 4u);
 }

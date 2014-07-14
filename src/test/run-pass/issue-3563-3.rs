@@ -16,12 +16,13 @@
 // However the extra library is designed to be optional (for code that must run on constrained
 //  environments like embedded devices or special environments like kernel code) so it must
 // be explicitly linked in.
-extern mod extra;
 
 // Extern mod controls linkage. Use controls the visibility of names to modules that are
 // already linked in. Using WriterUtil allows us to use the write_line method.
+
 use std::str;
-use std::vec;
+use std::slice;
+use std::fmt;
 
 // Represents a position on a canvas.
 struct Point {
@@ -41,14 +42,12 @@ struct Rect {
     size: Size,
 }
 
-// TODO: operators
-
 // Contains the information needed to do shape rendering via ASCII art.
 struct AsciiArt {
     width: uint,
     height: uint,
     fill: char,
-    lines: ~[~[char]],
+    lines: Vec<Vec<char> > ,
 
     // This struct can be quite large so we'll disable copying: developers need
     // to either pass these structs around via references or move them.
@@ -64,9 +63,10 @@ impl Drop for AsciiArt {
 fn AsciiArt(width: uint, height: uint, fill: char) -> AsciiArt {
     // Use an anonymous function to build a vector of vectors containing
     // blank characters for each position in our canvas.
-    let lines = vec::build(Some(height), |push| {
-        for _ in range(0, height) { push(vec::from_elem(width, '.')); }
-    });
+    let mut lines = Vec::new();
+    for _ in range(0, height) {
+        lines.push(Vec::from_elem(width, '.'));
+    }
 
     // Rust code often returns values by omitting the trailing semi-colon
     // instead of using an explicit return statement.
@@ -87,22 +87,26 @@ impl AsciiArt {
                 // element is:
                 // 1) potentially large
                 // 2) needs to be modified
-                let row = &mut self.lines[v];
-                row[h] = self.fill;
+                let row = self.lines.get_mut(v);
+                *row.get_mut(h) = self.fill;
             }
         }
     }
 }
 
-// Allows AsciiArt to be converted to a string using the libcore ToStr trait.
+// Allows AsciiArt to be converted to a string using the libcore ToString trait.
 // Note that the %s fmt! specifier will not call this automatically.
-impl ToStr for AsciiArt {
-    fn to_str(&self) -> ~str {
+impl fmt::Show for AsciiArt {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Convert each line into a string.
-        let lines = self.lines.map(|line| str::from_chars(*line));
+        let lines = self.lines.iter()
+                              .map(|line| {
+                                  str::from_chars(line.as_slice()).to_string()
+                              })
+                              .collect::<Vec<String>>();
 
         // Concatenate the lines together using a new-line.
-        lines.connect("\n")
+        write!(f, "{}", lines.connect("\n"))
     }
 }
 
@@ -155,7 +159,7 @@ pub fn check_strs(actual: &str, expected: &str) -> bool {
 
 fn test_ascii_art_ctor() {
     let art = AsciiArt(3, 3, '*');
-    assert!(check_strs(art.to_str(), "...\n...\n..."));
+    assert!(check_strs(art.to_string().as_slice(), "...\n...\n..."));
 }
 
 
@@ -164,7 +168,7 @@ fn test_add_pt() {
     art.add_pt(0, 0);
     art.add_pt(0, -10);
     art.add_pt(1, 2);
-    assert!(check_strs(art.to_str(), "*..\n...\n.*."));
+    assert!(check_strs(art.to_string().as_slice(), "*..\n...\n.*."));
 }
 
 
@@ -172,7 +176,7 @@ fn test_shapes() {
     let mut art = AsciiArt(4, 4, '*');
     art.add_rect(Rect {top_left: Point {x: 0, y: 0}, size: Size {width: 4, height: 4}});
     art.add_point(Point {x: 2, y: 2});
-    assert!(check_strs(art.to_str(), "****\n*..*\n*.**\n****"));
+    assert!(check_strs(art.to_string().as_slice(), "****\n*..*\n*.**\n****"));
 }
 
 pub fn main() {

@@ -11,17 +11,15 @@
 use std::task;
 
 pub fn main() {
-    let mut builder = task::task();
-    let mut result = builder.future_result();
-    builder.spawn(child);
-    error!("1");
+    let mut result = task::try_future(child);
+    println!("1");
     task::deschedule();
-    error!("2");
+    println!("2");
     task::deschedule();
-    error!("3");
-    result.recv();
+    println!("3");
+    result.unwrap();
 }
 
 fn child() {
-    error!("4"); task::deschedule(); error!("5"); task::deschedule(); error!("6");
+    println!("4"); task::deschedule(); println!("5"); task::deschedule(); println!("6");
 }

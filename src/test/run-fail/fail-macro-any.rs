@@ -8,8 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// error-pattern:failed at '~Any'
+// error-pattern:failed at 'Box<Any>'
+
 
 fn main() {
-    fail!(~413 as ~Any);
+    fail!(box 413i as Box<::std::any::Any+Send>);
 }

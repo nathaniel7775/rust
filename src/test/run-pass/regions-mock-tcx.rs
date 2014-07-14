@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-fast `use` standards don't resolve
 
 // Test a sample usage pattern for regions. Makes use of the
 // following features:
@@ -16,21 +15,22 @@
 // - Multiple lifetime parameters
 // - Arenas
 
-extern mod arena;
+extern crate arena;
+extern crate collections;
+extern crate libc;
 
 use arena::Arena;
-use std::hashmap::HashMap;
-use std::cast;
-use std::libc;
+use std::collections::HashMap;
 use std::mem;
 
 type Type<'tcx> = &'tcx TypeStructure<'tcx>;
 
+#[deriving(Show)]
 enum TypeStructure<'tcx> {
     TypeInt,
     TypeFunction(Type<'tcx>, Type<'tcx>),
 }
-impl<'tcx> Eq for TypeStructure<'tcx> {
+impl<'tcx> PartialEq for TypeStructure<'tcx> {
     fn eq(&self, other: &TypeStructure<'tcx>) -> bool {
         match (*self, *other) {
             (TypeInt, TypeInt) => true,
@@ -40,9 +40,11 @@ impl<'tcx> Eq for TypeStructure<'tcx> {
     }
 }
 
+impl<'tcx> Eq for TypeStructure<'tcx> {}
+
 struct TypeContext<'tcx, 'ast> {
     ty_arena: &'tcx Arena,
-    types: ~[Type<'tcx>],
+    types: Vec<Type<'tcx>> ,
     type_table: HashMap<NodeId, Type<'tcx>>,
 
     ast_arena: &'ast Arena,
@@ -53,7 +55,7 @@ impl<'tcx,'ast> TypeContext<'tcx, 'ast> {
     fn new(ty_arena: &'tcx Arena, ast_arena: &'ast Arena)
            -> TypeContext<'tcx, 'ast> {
         TypeContext { ty_arena: ty_arena,
-                      types: ~[],
+                      types: Vec::new(),
                       type_table: HashMap::new(),
 
                       ast_arena: ast_arena,
@@ -84,7 +86,7 @@ impl<'tcx,'ast> TypeContext<'tcx, 'ast> {
     }
 }
 
-#[deriving(Eq, IterBytes)]
+#[deriving(PartialEq, Eq, Hash)]
 struct NodeId {
     id: uint
 }

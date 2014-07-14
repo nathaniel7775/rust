@@ -10,10 +10,9 @@
 
 // error-pattern:explicit failure
 
-extern mod extra;
-use extra::arc;
+use std::sync::Arc;
 
-enum e<T> { e(arc::Arc<T>) }
+enum e<T> { e(Arc<T>) }
 
 fn foo() -> e<int> {fail!();}
 

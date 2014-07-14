@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::libc;
-use std::io::IoError;
-use std::rt::rtio::RtioTTY;
+use libc;
+use std::ptr;
+use std::rt::rtio::{RtioTTY, IoResult};
 
 use homing::{HomingIO, HomeHandle};
 use stream::StreamWatcher;
@@ -19,7 +19,7 @@ use uvio::UvIoFactory;
 use uvll;
 
 pub struct TtyWatcher{
-    tty: *uvll::uv_tty_t,
+    tty: *mut uvll::uv_tty_t,
     stream: StreamWatcher,
     home: HomeHandle,
     fd: libc::c_int,
@@ -39,7 +39,7 @@ impl TtyWatcher {
         // - https://github.com/joyent/libuv/issues/982
         // - https://github.com/joyent/libuv/issues/988
         let guess = unsafe { uvll::guess_handle(fd) };
-        if readable && guess != uvll::UV_TTY as libc::c_int {
+        if guess != uvll::UV_TTY as libc::c_int {
             return Err(UvError(uvll::EBADF));
         }
 
@@ -54,20 +54,24 @@ impl TtyWatcher {
         // If this file descriptor is indeed guessed to be a tty, then go ahead
         // with attempting to open it as a tty.
         let handle = UvHandle::alloc(None::<TtyWatcher>, uvll::UV_TTY);
+        let mut watcher = TtyWatcher {
+            tty: handle,
+            stream: StreamWatcher::new(handle, true),
+            home: io.make_handle(),
+            fd: fd,
+        };
         match unsafe {
             uvll::uv_tty_init(io.uv_loop(), handle, fd as libc::c_int,
                               readable as libc::c_int)
         } {
-            0 => {
-                Ok(TtyWatcher {
-                    tty: handle,
-                    stream: StreamWatcher::new(handle),
-                    home: io.make_handle(),
-                    fd: fd,
-                })
-            }
+            0 => Ok(watcher),
             n => {
-                unsafe { uvll::free_handle(handle) }
+                // On windows, libuv returns errors before initializing the
+                // handle, so our only cleanup is to free the handle itself
+                if cfg!(windows) {
+                    unsafe { uvll::free_handle(handle); }
+                    watcher.tty = ptr::mut_null();
+                }
                 Err(UvError(n))
             }
         }
@@ -75,17 +79,17 @@ impl TtyWatcher {
 }
 
 impl RtioTTY for TtyWatcher {
-    fn read(&mut self, buf: &mut [u8]) -> Result<uint, IoError> {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<uint> {
         let _m = self.fire_homing_missile();
         self.stream.read(buf).map_err(uv_error_to_io_error)
     }
 
-    fn write(&mut self, buf: &[u8]) -> Result<(), IoError> {
+    fn write(&mut self, buf: &[u8]) -> IoResult<()> {
         let _m = self.fire_homing_missile();
-        self.stream.write(buf).map_err(uv_error_to_io_error)
+        self.stream.write(buf, false).map_err(uv_error_to_io_error)
     }
 
-    fn set_raw(&mut self, raw: bool) -> Result<(), IoError> {
+    fn set_raw(&mut self, raw: bool) -> IoResult<()> {
         let raw = raw as libc::c_int;
         let _m = self.fire_homing_missile();
         match unsafe { uvll::uv_tty_set_mode(self.tty, raw) } {
@@ -95,11 +99,11 @@ impl RtioTTY for TtyWatcher {
     }
 
     #[allow(unused_mut)]
-    fn get_winsize(&mut self) -> Result<(int, int), IoError> {
+    fn get_winsize(&mut self) -> IoResult<(int, int)> {
         let mut width: libc::c_int = 0;
         let mut height: libc::c_int = 0;
-        let widthptr: *libc::c_int = &width;
-        let heightptr: *libc::c_int = &width;
+        let widthptr: *mut libc::c_int = &mut width;
+        let heightptr: *mut libc::c_int = &mut width;
 
         let _m = self.fire_homing_missile();
         match unsafe { uvll::uv_tty_get_winsize(self.tty,
@@ -115,7 +119,7 @@ impl RtioTTY for TtyWatcher {
 }
 
 impl UvHandle<uvll::uv_tty_t> for TtyWatcher {
-    fn uv_handle(&self) -> *uvll::uv_tty_t { self.tty }
+    fn uv_handle(&self) -> *mut uvll::uv_tty_t { self.tty }
 }
 
 impl HomingIO for TtyWatcher {
@@ -124,7 +128,9 @@ impl HomingIO for TtyWatcher {
 
 impl Drop for TtyWatcher {
     fn drop(&mut self) {
-        let _m = self.fire_homing_missile();
-        self.close_async_();
+        if !self.tty.is_null() {
+            let _m = self.fire_homing_missile();
+            self.close_async_();
+        }
     }
 }

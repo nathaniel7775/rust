@@ -8,40 +8,44 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-fast
-// xfail-android (FIXME #11419)
+// ignore-android (FIXME #11419)
 // exec-env:RUST_LOG=info
 
-#[no_uv];
-extern mod native;
+#![feature(phase)]
 
+#[phase(plugin, link)]
+extern crate log;
+extern crate native;
+
+use log::{set_logger, Logger, LogRecord};
 use std::fmt;
-use std::io::{PortReader, ChanWriter};
-use std::logging::{set_logger, Logger};
+use std::io::{ChanReader, ChanWriter};
 
 struct MyWriter(ChanWriter);
 
 impl Logger for MyWriter {
-    fn log(&mut self, _level: u32, args: &fmt::Arguments) {
+    fn log(&mut self, record: &LogRecord) {
         let MyWriter(ref mut inner) = *self;
-        fmt::writeln(inner as &mut Writer, args);
+        write!(inner, "{}", record.args);
     }
 }
 
 #[start]
-fn start(argc: int, argv: **u8) -> int {
+fn start(argc: int, argv: *const *const u8) -> int {
     native::start(argc, argv, proc() {
         main();
     })
 }
 
 fn main() {
-    let (p, c) = Chan::new();
-    let (mut r, w) = (PortReader::new(p), ChanWriter::new(c));
+    let (tx, rx) = channel();
+    let (mut r, w) = (ChanReader::new(rx), ChanWriter::new(tx));
     spawn(proc() {
-        set_logger(~MyWriter(w) as ~Logger);
+        set_logger(box MyWriter(w) as Box<Logger+Send>);
         debug!("debug");
         info!("info");
     });
-    assert_eq!(r.read_to_str(), ~"info\n");
+    let s = r.read_to_string().unwrap();
+    assert!(s.as_slice().contains("info"));
+    assert!(!s.as_slice().contains("debug"));
 }

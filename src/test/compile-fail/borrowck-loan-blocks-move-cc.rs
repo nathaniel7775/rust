@@ -15,17 +15,19 @@ fn borrow(v: &int, f: |x: &int|) {
 }
 
 fn box_imm() {
-    let v = ~3;
+    let v = box 3i;
     let _w = &v;
     task::spawn(proc() {
-        info!("v={}", *v);
+        println!("v={}", *v);
         //~^ ERROR cannot move `v` into closure
     });
+}
 
-    let v = ~3;
+fn box_imm_explicit() {
+    let v = box 3i;
     let _w = &v;
     task::spawn(proc() {
-        info!("v={}", *v);
+        println!("v={}", *v);
         //~^ ERROR cannot move
     });
 }

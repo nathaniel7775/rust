@@ -8,8 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+
 pub enum Thing {
-    A(~Foo)
+    A(Box<Foo>)
 }
 
 pub trait Foo {}
@@ -19,8 +20,8 @@ pub struct Struct;
 impl Foo for Struct {}
 
 pub fn main() {
-    match A(~Struct as ~Foo) {
-        A(_a) => 0,
+    match A(box Struct as Box<Foo>) {
+        A(_a) => 0i,
     };
 }
 

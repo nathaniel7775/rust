@@ -8,12 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
-
 use std::task;
 
 fn f() {
-    let _a = ~0;
+    let _a = box 0i;
     fail!();
 }
 

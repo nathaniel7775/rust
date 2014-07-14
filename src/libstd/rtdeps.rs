@@ -12,8 +12,10 @@
 //! the standard library This varies per-platform, but these libraries are
 //! necessary for running libstd.
 
+#![experimental]
+
 // All platforms need to link to rustrt
-#[link(name = "rustrt", kind = "static")]
+#[link(name = "rust_builtin", kind = "static")]
 extern {}
 
 // LLVM implements the `frem` instruction as a call to `fmod`, which lives in
@@ -23,14 +25,12 @@ extern {}
 // and binutils 2.22+ won't add them automatically
 #[cfg(target_os = "linux")]
 #[link(name = "dl")]
-#[link(name = "m")]
 #[link(name = "pthread")]
 extern {}
 
 #[cfg(target_os = "android")]
 #[link(name = "dl")]
 #[link(name = "log")]
-#[link(name = "m")]
 extern {}
 
 #[cfg(target_os = "freebsd")]
@@ -39,5 +39,9 @@ extern {}
 extern {}
 
 #[cfg(target_os = "macos")]
-#[link(name = "pthread")]
+#[link(name = "System")]
+extern {}
+
+#[cfg(target_os = "ios")]
+#[link(name = "System")]
 extern {}

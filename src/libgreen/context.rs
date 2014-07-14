@@ -8,80 +8,57 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::libc::c_void;
-use std::uint;
-use std::cast::{transmute, transmute_mut_unsafe,
-                transmute_region, transmute_mut_region};
 use stack::Stack;
-use std::unstable::stack;
+use std::uint;
+use std::mem::transmute;
+use std::rt::stack;
+use std::raw;
 
 // FIXME #7761: Registers is boxed so that it is 16-byte aligned, for storing
 // SSE regs.  It would be marginally better not to do this. In C++ we
 // use an attribute on a struct.
-// FIXME #7761: It would be nice to define regs as `~Option<Registers>` since
-// the registers are sometimes empty, but the discriminant would
+// FIXME #7761: It would be nice to define regs as `Box<Option<Registers>>`
+// since the registers are sometimes empty, but the discriminant would
 // then misalign the regs again.
 pub struct Context {
-    /// The context entry point, saved here for later destruction
-    priv start: Option<~proc()>,
     /// Hold the registers while the task or scheduler is suspended
-    priv regs: ~Registers,
+    regs: Box<Registers>,
     /// Lower bound and upper bound for the stack
-    priv stack_bounds: Option<(uint, uint)>,
+    stack_bounds: Option<(uint, uint)>,
 }
+
+pub type InitFn = extern "C" fn(uint, *mut (), *mut ()) -> !;
 
 impl Context {
     pub fn empty() -> Context {
         Context {
-            start: None,
             regs: new_regs(),
             stack_bounds: None,
         }
     }
 
     /// Create a new context that will resume execution by running proc()
-    pub fn new(start: proc(), stack: &mut Stack) -> Context {
-        // The C-ABI function that is the task entry point
-        //
-        // Note that this function is a little sketchy. We're taking a
-        // procedure, transmuting it to a stack-closure, and then calling to
-        // closure. This leverages the fact that the representation of these two
-        // types is the same.
-        //
-        // The reason that we're doing this is that this procedure is expected
-        // to never return. The codegen which frees the environment of the
-        // procedure occurs *after* the procedure has completed, and this means
-        // that we'll never actually free the procedure.
-        //
-        // To solve this, we use this transmute (to not trigger the procedure
-        // deallocation here), and then store a copy of the procedure in the
-        // `Context` structure returned. When the `Context` is deallocated, then
-        // the entire procedure box will be deallocated as well.
-        extern fn task_start_wrapper(f: &proc()) {
-            unsafe {
-                let f: &|| = transmute(f);
-                (*f)()
-            }
-        }
+    ///
+    /// The `init` function will be run with `arg` and the `start` procedure
+    /// split up into code and env pointers. It is required that the `init`
+    /// function never return.
+    ///
+    /// FIXME: this is basically an awful the interface. The main reason for
+    ///        this is to reduce the number of allocations made when a green
+    ///        task is spawned as much as possible
+    pub fn new(init: InitFn, arg: uint, start: proc():Send,
+               stack: &mut Stack) -> Context {
 
-        let sp: *uint = stack.end();
-        let sp: *mut uint = unsafe { transmute_mut_unsafe(sp) };
+        let sp: *const uint = stack.end();
+        let sp: *mut uint = sp as *mut uint;
         // Save and then immediately load the current context,
         // which we will then modify to call the given function when restored
         let mut regs = new_regs();
-        unsafe {
-            rust_swap_registers(transmute_mut_region(&mut *regs),
-                                transmute_region(&*regs));
-        };
-
-        // FIXME #7767: Putting main into a ~ so it's a thin pointer and can
-        // be passed to the spawn function.  Another unfortunate
-        // allocation
-        let start = ~start;
 
         initialize_call_frame(&mut *regs,
-                              task_start_wrapper as *c_void,
-                              unsafe { transmute(&*start) },
+                              init,
+                              arg,
+                              unsafe { transmute(start) },
                               sp);
 
         // Scheduler tasks don't have a stack in the "we allocated it" sense,
@@ -89,14 +66,13 @@ impl Context {
         // them in terms of the code running on them (and hopefully they don't
         // overflow). Additionally, their coroutine stacks are listed as being
         // zero-length, so that's how we detect what's what here.
-        let stack_base: *uint = stack.start();
+        let stack_base: *const uint = stack.start();
         let bounds = if sp as uint == stack_base as uint {
             None
         } else {
             Some((stack_base as uint, sp as uint))
         };
         return Context {
-            start: Some(start),
             regs: regs,
             stack_bounds: bounds,
         }
@@ -111,10 +87,10 @@ impl Context {
     pub fn swap(out_context: &mut Context, in_context: &Context) {
         rtdebug!("swapping contexts");
         let out_regs: &mut Registers = match out_context {
-            &Context { regs: ~ref mut r, .. } => r
+            &Context { regs: box ref mut r, .. } => r
         };
         let in_regs: &Registers = match in_context {
-            &Context { regs: ~ref r, .. } => r
+            &Context { regs: box ref r, .. } => r
         };
 
         rtdebug!("noting the stack limit and doing raw swap");
@@ -138,9 +114,9 @@ impl Context {
     }
 }
 
-#[link(name = "rustrt", kind = "static")]
+#[link(name = "context_switch", kind = "static")]
 extern {
-    fn rust_swap_registers(out_regs: *mut Registers, in_regs: *Registers);
+    fn rust_swap_registers(out_regs: *mut Registers, in_regs: *const Registers);
 }
 
 // Register contexts used in various architectures
@@ -167,6 +143,7 @@ extern {
 // stacks are disabled.
 
 #[cfg(target_arch = "x86")]
+#[repr(C)]
 struct Registers {
     eax: u32, ebx: u32, ecx: u32, edx: u32,
     ebp: u32, esi: u32, edi: u32, esp: u32,
@@ -175,8 +152,8 @@ struct Registers {
 }
 
 #[cfg(target_arch = "x86")]
-fn new_regs() -> ~Registers {
-    ~Registers {
+fn new_regs() -> Box<Registers> {
+    box Registers {
         eax: 0, ebx: 0, ecx: 0, edx: 0,
         ebp: 0, esi: 0, edi: 0, esp: 0,
         cs: 0, ds: 0, ss: 0, es: 0, fs: 0, gs: 0,
@@ -185,13 +162,17 @@ fn new_regs() -> ~Registers {
 }
 
 #[cfg(target_arch = "x86")]
-fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
-                         sp: *mut uint) {
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: uint,
+                         procedure: raw::Procedure, sp: *mut uint) {
 
+    // x86 has interesting stack alignment requirements, so do some alignment
+    // plus some offsetting to figure out what the actual stack should be.
     let sp = align_down(sp);
     let sp = mut_offset(sp, -4);
 
-    unsafe { *sp = arg as uint };
+    unsafe { *mut_offset(sp, 2) = procedure.env as uint };
+    unsafe { *mut_offset(sp, 1) = procedure.code as uint };
+    unsafe { *mut_offset(sp, 0) = arg as uint };
     let sp = mut_offset(sp, -1);
     unsafe { *sp = 0 }; // The final return address
 
@@ -210,19 +191,23 @@ type Registers = [uint, ..34];
 type Registers = [uint, ..22];
 
 #[cfg(windows, target_arch = "x86_64")]
-fn new_regs() -> ~Registers { ~([0, .. 34]) }
+fn new_regs() -> Box<Registers> { box() ([0, .. 34]) }
 #[cfg(not(windows), target_arch = "x86_64")]
-fn new_regs() -> ~Registers { ~([0, .. 22]) }
+fn new_regs() -> Box<Registers> { box() ([0, .. 22]) }
 
 #[cfg(target_arch = "x86_64")]
-fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
-                         sp: *mut uint) {
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: uint,
+                         procedure: raw::Procedure, sp: *mut uint) {
+    extern { fn rust_bootstrap_green_task(); }
 
     // Redefinitions from rt/arch/x86_64/regs.h
-    static RUSTRT_ARG0: uint = 3;
     static RUSTRT_RSP: uint = 1;
     static RUSTRT_IP: uint = 8;
     static RUSTRT_RBP: uint = 2;
+    static RUSTRT_R12: uint = 4;
+    static RUSTRT_R13: uint = 5;
+    static RUSTRT_R14: uint = 6;
+    static RUSTRT_R15: uint = 7;
 
     let sp = align_down(sp);
     let sp = mut_offset(sp, -1);
@@ -231,13 +216,23 @@ fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
     unsafe { *sp = 0; }
 
     rtdebug!("creating call frame");
-    rtdebug!("fptr {}", fptr);
-    rtdebug!("arg {}", arg);
+    rtdebug!("fptr {:#x}", fptr as uint);
+    rtdebug!("arg {:#x}", arg);
     rtdebug!("sp {}", sp);
 
-    regs[RUSTRT_ARG0] = arg as uint;
+    // These registers are frobbed by rust_bootstrap_green_task into the right
+    // location so we can invoke the "real init function", `fptr`.
+    regs[RUSTRT_R12] = arg as uint;
+    regs[RUSTRT_R13] = procedure.code as uint;
+    regs[RUSTRT_R14] = procedure.env as uint;
+    regs[RUSTRT_R15] = fptr as uint;
+
+    // These registers are picked up by the regular context switch paths. These
+    // will put us in "mostly the right context" except for frobbing all the
+    // arguments to the right place. We have the small trampoline code inside of
+    // rust_bootstrap_green_task to do that.
     regs[RUSTRT_RSP] = sp as uint;
-    regs[RUSTRT_IP] = fptr as uint;
+    regs[RUSTRT_IP] = rust_bootstrap_green_task as uint;
 
     // Last base pointer on the stack should be 0
     regs[RUSTRT_RBP] = 0;
@@ -247,11 +242,13 @@ fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
 type Registers = [uint, ..32];
 
 #[cfg(target_arch = "arm")]
-fn new_regs() -> ~Registers { ~([0, .. 32]) }
+fn new_regs() -> Box<Registers> { box {[0, .. 32]} }
 
 #[cfg(target_arch = "arm")]
-fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
-                         sp: *mut uint) {
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: uint,
+                         procedure: raw::Procedure, sp: *mut uint) {
+    extern { fn rust_bootstrap_green_task(); }
+
     let sp = align_down(sp);
     // sp of arm eabi is 8-byte aligned
     let sp = mut_offset(sp, -2);
@@ -259,20 +256,29 @@ fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
     // The final return address. 0 indicates the bottom of the stack
     unsafe { *sp = 0; }
 
-    regs[0] = arg as uint;   // r0
-    regs[13] = sp as uint;   // #53 sp, r13
-    regs[14] = fptr as uint; // #60 pc, r15 --> lr
+    // ARM uses the same technique as x86_64 to have a landing pad for the start
+    // of all new green tasks. Neither r1/r2 are saved on a context switch, so
+    // the shim will copy r3/r4 into r1/r2 and then execute the function in r5
+    regs[0] = arg as uint;              // r0
+    regs[3] = procedure.code as uint;   // r3
+    regs[4] = procedure.env as uint;    // r4
+    regs[5] = fptr as uint;             // r5
+    regs[13] = sp as uint;                          // #52 sp, r13
+    regs[14] = rust_bootstrap_green_task as uint;   // #56 pc, r14 --> lr
 }
 
 #[cfg(target_arch = "mips")]
+#[cfg(target_arch = "mipsel")]
 type Registers = [uint, ..32];
 
 #[cfg(target_arch = "mips")]
-fn new_regs() -> ~Registers { ~([0, .. 32]) }
+#[cfg(target_arch = "mipsel")]
+fn new_regs() -> Box<Registers> { box {[0, .. 32]} }
 
 #[cfg(target_arch = "mips")]
-fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
-                         sp: *mut uint) {
+#[cfg(target_arch = "mipsel")]
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: uint,
+                         procedure: raw::Procedure, sp: *mut uint) {
     let sp = align_down(sp);
     // sp of mips o32 is 8-byte aligned
     let sp = mut_offset(sp, -2);
@@ -281,17 +287,16 @@ fn initialize_call_frame(regs: &mut Registers, fptr: *c_void, arg: *c_void,
     unsafe { *sp = 0; }
 
     regs[4] = arg as uint;
+    regs[5] = procedure.code as uint;
+    regs[6] = procedure.env as uint;
     regs[29] = sp as uint;
     regs[25] = fptr as uint;
     regs[31] = fptr as uint;
 }
 
 fn align_down(sp: *mut uint) -> *mut uint {
-    unsafe {
-        let sp: uint = transmute(sp);
-        let sp = sp & !(16 - 1);
-        transmute::<uint, *mut uint>(sp)
-    }
+    let sp = (sp as uint) & !(16 - 1);
+    sp as *mut uint
 }
 
 // ptr::mut_offset is positive ints only

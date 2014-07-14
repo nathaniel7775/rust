@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
-
 use std::io;
 
 trait Trait {
@@ -27,25 +25,18 @@ impl Trait for Struct {
     }
 }
 
-fn f(x: @Trait) {
-    x.f();
-}
-
-fn foo(mut a: ~Writer) {
-    a.write(bytes!("Hello\n"));
+fn foo(mut a: Box<Writer>) {
+    a.write(b"Hello\n");
 }
 
 pub fn main() {
     let a = Struct { x: 1, y: 2 };
-    let b: @Trait = @a;
+    let b: Box<Trait> = box a;
     b.f();
-    let c: ~Trait = ~a;
+    let c: &Trait = &a;
     c.f();
-    let d: &Trait = &a;
-    d.f();
-    f(@a);
 
     let out = io::stdout();
-    foo(~out);
+    foo(box out);
 }
 

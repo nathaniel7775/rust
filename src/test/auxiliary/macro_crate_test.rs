@@ -10,35 +10,46 @@
 
 // force-host
 
-#[feature(globs, macro_registrar, macro_rules)];
+#![feature(globs, plugin_registrar, macro_rules, quote, managed_boxes)]
 
-extern mod syntax;
+extern crate syntax;
+extern crate rustc;
 
-use syntax::ast::{Name, TokenTree};
+use syntax::ast::{TokenTree, Item, MetaItem};
 use syntax::codemap::Span;
 use syntax::ext::base::*;
 use syntax::parse::token;
+use rustc::plugin::Registry;
+
+use std::gc::{Gc, GC};
 
 #[macro_export]
-macro_rules! exported_macro (() => (2))
+macro_rules! exported_macro (() => (2i))
 
-macro_rules! unexported_macro (() => (3))
+macro_rules! unexported_macro (() => (3i))
 
-#[macro_registrar]
-pub fn macro_registrar(register: |Name, SyntaxExtension|) {
-    register(token::intern("make_a_1"),
-        NormalTT(~BasicMacroExpander {
-            expander: expand_make_a_1,
-            span: None,
-        },
-        None));
+#[plugin_registrar]
+pub fn plugin_registrar(reg: &mut Registry) {
+    reg.register_macro("make_a_1", expand_make_a_1);
+    reg.register_syntax_extension(
+        token::intern("into_foo"),
+        ItemModifier(expand_into_foo));
 }
 
-pub fn expand_make_a_1(cx: &mut ExtCtxt, sp: Span, tts: &[TokenTree]) -> MacResult {
+fn expand_make_a_1(cx: &mut ExtCtxt, sp: Span, tts: &[TokenTree])
+                   -> Box<MacResult> {
     if !tts.is_empty() {
         cx.span_fatal(sp, "make_a_1 takes no arguments");
     }
-    MRExpr(quote_expr!(cx, 1i))
+    MacExpr::new(quote_expr!(cx, 1i))
+}
+
+fn expand_into_foo(cx: &mut ExtCtxt, sp: Span, attr: Gc<MetaItem>, it: Gc<Item>)
+                   -> Gc<Item> {
+    box(GC) Item {
+        attrs: it.attrs.clone(),
+        ..(*quote_item!(cx, enum Foo { Bar, Baz }).unwrap()).clone()
+    }
 }
 
 pub fn foo() {}

@@ -10,8 +10,8 @@
 
 // error-pattern:runned an unexported test
 // compile-flags:--test
-
-extern mod extra;
+// check-stdout
+// ignore-pretty: does not work well with `--test`
 
 mod m {
     pub fn exported() { }

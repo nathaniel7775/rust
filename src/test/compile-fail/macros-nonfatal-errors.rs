@@ -11,8 +11,8 @@
 // test that errors in a (selection) of macros don't kill compilation
 // immediately, so that we get more errors listed at a time.
 
-#[feature(asm)];
-#[feature(trace_macros)];
+#![feature(asm)]
+#![feature(trace_macros, concat_idents)]
 
 #[deriving(Default, //~ ERROR
            Rand, //~ ERROR
@@ -22,7 +22,8 @@ enum CantDeriveThose {}
 fn main() {
     doesnt_exist!(); //~ ERROR
 
-    bytes!(invalid); //~ ERROR
+    bytes!(invalid); //~ ERROR non-literal in bytes!
+    //~^ WARN `bytes!` is deprecated
 
     asm!(invalid); //~ ERROR
 

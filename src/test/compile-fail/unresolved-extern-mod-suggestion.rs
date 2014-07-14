@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern mod extra;
-use extra; //~ ERROR unresolved import (maybe you meant `extra::*`?)
+extern crate url;
+use url; //~ ERROR unresolved import (maybe you meant `url::*`?)
 
 fn main() {}

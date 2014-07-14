@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,20 +8,21 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
-// xfail-fast
 // aux-build:issue-2631-a.rs
 
-extern mod req;
+extern crate collections;
+extern crate req;
 
 use req::request;
 use std::cell::RefCell;
-use std::hashmap::HashMap;
+use std::collections::HashMap;
+use std::gc::GC;
 
 pub fn main() {
-  let v = ~[@~"hi"];
+  let v = vec!(box(GC) "hi".to_string());
   let mut m: req::header_map = HashMap::new();
-  m.insert(~"METHOD", @RefCell::new(v));
+  m.insert("METHOD".to_string(), box(GC) RefCell::new(v));
   request::<int>(&m);
 }

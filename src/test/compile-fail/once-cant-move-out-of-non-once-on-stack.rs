@@ -11,8 +11,7 @@
 // Testing guarantees provided by once functions.
 // This program would segfault if it were legal.
 
-extern mod extra;
-use extra::arc;
+use std::sync::Arc;
 
 fn foo(blk: ||) {
     blk();
@@ -20,9 +19,9 @@ fn foo(blk: ||) {
 }
 
 fn main() {
-    let x = arc::Arc::new(true);
+    let x = Arc::new(true);
     foo(|| {
-        assert!(*x.get());
+        assert!(*x);
         drop(x); //~ ERROR cannot move out of captured outer variable
     })
 }

@@ -1,4 +1,4 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -26,33 +26,73 @@
  * to write OS-ignorant code by default.
  */
 
-#[allow(missing_doc)];
+#![experimental]
+
+#![allow(missing_doc)]
+#![allow(non_snake_case_functions)]
 
 use clone::Clone;
-use container::Container;
-#[cfg(target_os = "macos")]
-use iter::range;
-use libc;
-use libc::{c_char, c_void, c_int};
-use option::{Some, None};
-use os;
-use prelude::*;
-use ptr;
-use str;
+use collections::Collection;
 use fmt;
-use unstable::finally::Finally;
+use io::{IoResult, IoError};
+use iter::Iterator;
+use libc::{c_void, c_int};
+use libc;
+use ops::Drop;
+use option::{Some, None, Option};
+use os;
+use path::{Path, GenericPath, BytesContainer};
+use ptr::RawPtr;
+use ptr;
+use result::{Err, Ok, Result};
+use slice::{Vector, ImmutableVector, MutableVector, ImmutableEqVector};
+use str::{Str, StrSlice, StrAllocating};
+use str;
+use string::String;
 use sync::atomics::{AtomicInt, INIT_ATOMIC_INT, SeqCst};
+use vec::Vec;
 
-/// Delegates to the libc close() function, returning the same return value.
-pub fn close(fd: int) -> int {
+#[cfg(unix)]
+use c_str::ToCStr;
+#[cfg(unix)]
+use libc::c_char;
+#[cfg(windows)]
+use str::OwnedStr;
+
+/// Get the number of cores available
+pub fn num_cpus() -> uint {
     unsafe {
-        libc::close(fd as c_int) as int
+        return rust_get_num_cpus();
+    }
+
+    extern {
+        fn rust_get_num_cpus() -> libc::uintptr_t;
     }
 }
 
 pub static TMPBUF_SZ : uint = 1000u;
 static BUF_BYTES : uint = 2048u;
 
+/// Returns the current working directory as a Path.
+///
+/// # Failure
+///
+/// Fails if the current working directory value is invalid:
+/// Possibles cases:
+///
+/// * Current directory does not exist.
+/// * There are insufficient permissions to access the current directory.
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// // We assume that we are in a valid directory like "/home".
+/// let current_working_directory = os::getcwd();
+/// println!("The current directory is {}", current_working_directory.display());
+/// // /home
+/// ```
 #[cfg(unix)]
 pub fn getcwd() -> Path {
     use c_str::CString;
@@ -66,17 +106,39 @@ pub fn getcwd() -> Path {
     }
 }
 
+/// Returns the current working directory as a Path.
+///
+/// # Failure
+///
+/// Fails if the current working directory value is invalid.
+/// Possibles cases:
+///
+/// * Current directory does not exist.
+/// * There are insufficient permissions to access the current directory.
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// // We assume that we are in a valid directory like "C:\\Windows".
+/// let current_working_directory = os::getcwd();
+/// println!("The current directory is {}", current_working_directory.display());
+/// // C:\\Windows
+/// ```
 #[cfg(windows)]
 pub fn getcwd() -> Path {
     use libc::DWORD;
     use libc::GetCurrentDirectoryW;
+
     let mut buf = [0 as u16, ..BUF_BYTES];
     unsafe {
         if libc::GetCurrentDirectoryW(buf.len() as DWORD, buf.as_mut_ptr()) == 0 as DWORD {
             fail!();
         }
     }
-    Path::new(str::from_utf16(buf))
+    Path::new(str::from_utf16(str::truncate_utf16_at_nul(buf))
+              .expect("GetCurrentDirectoryW returned invalid UTF-16"))
 }
 
 #[cfg(windows)]
@@ -86,44 +148,45 @@ pub mod win32 {
     use option::{None, Option};
     use option;
     use os::TMPBUF_SZ;
+    use slice::{MutableVector, ImmutableVector};
+    use string::String;
     use str::StrSlice;
     use str;
-    use vec::{MutableVector, ImmutableVector, OwnedVector};
-    use vec;
+    use vec::Vec;
 
     pub fn fill_utf16_buf_and_decode(f: |*mut u16, DWORD| -> DWORD)
-        -> Option<~str> {
+        -> Option<String> {
 
         unsafe {
             let mut n = TMPBUF_SZ as DWORD;
             let mut res = None;
             let mut done = false;
             while !done {
-                let mut buf = vec::from_elem(n as uint, 0u16);
-                let k = f(buf.as_mut_ptr(), TMPBUF_SZ as DWORD);
+                let mut buf = Vec::from_elem(n as uint, 0u16);
+                let k = f(buf.as_mut_ptr(), n);
                 if k == (0 as DWORD) {
                     done = true;
                 } else if k == n &&
                           libc::GetLastError() ==
                           libc::ERROR_INSUFFICIENT_BUFFER as DWORD {
-                    n *= (2 as DWORD);
+                    n *= 2 as DWORD;
+                } else if k >= n {
+                    n = k;
                 } else {
                     done = true;
                 }
                 if k != 0 && done {
                     let sub = buf.slice(0, k as uint);
-                    res = option::Some(str::from_utf16(sub));
+                    // We want to explicitly catch the case when the
+                    // closure returned invalid UTF-16, rather than
+                    // set `res` to None and continue.
+                    let s = str::from_utf16(sub)
+                        .expect("fill_utf16_buf_and_decode: closure created invalid UTF-16");
+                    res = option::Some(s)
                 }
             }
             return res;
         }
-    }
-
-    pub fn as_utf16_p<T>(s: &str, f: |*u16| -> T) -> T {
-        let mut t = s.to_utf16();
-        // Null terminate before passing on.
-        t.push(0u16);
-        f(t.as_ptr())
     }
 }
 
@@ -132,70 +195,112 @@ Accessing environment variables is not generally threadsafe.
 Serialize access through a global lock.
 */
 fn with_env_lock<T>(f: || -> T) -> T {
-    use unstable::mutex::{Mutex, MUTEX_INIT};
-    use unstable::finally::Finally;
+    use rt::mutex::{StaticNativeMutex, NATIVE_MUTEX_INIT};
 
-    static mut lock: Mutex = MUTEX_INIT;
+    static mut lock: StaticNativeMutex = NATIVE_MUTEX_INIT;
 
     unsafe {
-        return (|| {
-            lock.lock();
-            f()
-        }).finally(|| lock.unlock());
+        let _guard = lock.lock();
+        f()
     }
 }
 
-/// Returns a vector of (variable, value) pairs for all the environment
+/// Returns a vector of (variable, value) pairs, for all the environment
 /// variables of the current process.
-pub fn env() -> ~[(~str,~str)] {
+///
+/// Invalid UTF-8 bytes are replaced with \uFFFD. See `str::from_utf8_lossy()`
+/// for details.
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// // We will iterate through the references to the element returned by os::env();
+/// for &(ref key, ref value) in os::env().iter() {
+///     println!("'{}': '{}'", key, value );
+/// }
+/// ```
+pub fn env() -> Vec<(String,String)> {
+    env_as_bytes().move_iter().map(|(k,v)| {
+        let k = String::from_str(str::from_utf8_lossy(k.as_slice()).as_slice());
+        let v = String::from_str(str::from_utf8_lossy(v.as_slice()).as_slice());
+        (k,v)
+    }).collect()
+}
+
+/// Returns a vector of (variable, value) byte-vector pairs for all the
+/// environment variables of the current process.
+pub fn env_as_bytes() -> Vec<(Vec<u8>,Vec<u8>)> {
     unsafe {
         #[cfg(windows)]
-        unsafe fn get_env_pairs() -> ~[~str] {
-            use c_str;
-            use str::StrSlice;
+        unsafe fn get_env_pairs() -> Vec<Vec<u8>> {
+            use slice::raw;
 
             use libc::funcs::extra::kernel32::{
-                GetEnvironmentStringsA,
-                FreeEnvironmentStringsA
+                GetEnvironmentStringsW,
+                FreeEnvironmentStringsW
             };
-            let ch = GetEnvironmentStringsA();
+            let ch = GetEnvironmentStringsW();
             if ch as uint == 0 {
                 fail!("os::env() failure getting env string from OS: {}",
                        os::last_os_error());
             }
-            let mut result = ~[];
-            c_str::from_c_multistring(ch as *c_char, None, |cstr| {
-                result.push(cstr.as_str().unwrap().to_owned());
-            });
-            FreeEnvironmentStringsA(ch);
+            // Here, we lossily decode the string as UTF16.
+            //
+            // The docs suggest that the result should be in Unicode, but
+            // Windows doesn't guarantee it's actually UTF16 -- it doesn't
+            // validate the environment string passed to CreateProcess nor
+            // SetEnvironmentVariable.  Yet, it's unlikely that returning a
+            // raw u16 buffer would be of practical use since the result would
+            // be inherently platform-dependent and introduce additional
+            // complexity to this code.
+            //
+            // Using the non-Unicode version of GetEnvironmentStrings is even
+            // worse since the result is in an OEM code page.  Characters that
+            // can't be encoded in the code page would be turned into question
+            // marks.
+            let mut result = Vec::new();
+            let mut i = 0;
+            while *ch.offset(i) != 0 {
+                let p = &*ch.offset(i);
+                let len = ptr::position(p, |c| *c == 0);
+                raw::buf_as_slice(p, len, |s| {
+                    result.push(str::from_utf16_lossy(s).into_bytes());
+                });
+                i += len as int + 1;
+            }
+            FreeEnvironmentStringsW(ch);
             result
         }
         #[cfg(unix)]
-        unsafe fn get_env_pairs() -> ~[~str] {
+        unsafe fn get_env_pairs() -> Vec<Vec<u8>> {
+            use c_str::CString;
+
             extern {
-                fn rust_env_pairs() -> **c_char;
+                fn rust_env_pairs() -> *const *const c_char;
             }
             let environ = rust_env_pairs();
             if environ as uint == 0 {
                 fail!("os::env() failure getting env string from OS: {}",
                        os::last_os_error());
             }
-            let mut result = ~[];
+            let mut result = Vec::new();
             ptr::array_each(environ, |e| {
-                let env_pair = str::raw::from_c_str(e);
-                debug!("get_env_pairs: {}", env_pair);
+                let env_pair =
+                    Vec::from_slice(CString::new(e, false).as_bytes_no_nul());
                 result.push(env_pair);
             });
             result
         }
 
-        fn env_convert(input: ~[~str]) -> ~[(~str, ~str)] {
-            let mut pairs = ~[];
+        fn env_convert(input: Vec<Vec<u8>>) -> Vec<(Vec<u8>, Vec<u8>)> {
+            let mut pairs = Vec::new();
             for p in input.iter() {
-                let vs: ~[&str] = p.splitn('=', 1).collect();
-                debug!("splitting: len: {}", vs.len());
-                assert_eq!(vs.len(), 2);
-                pairs.push((vs[0].to_owned(), vs[1].to_owned()));
+                let mut it = p.as_slice().splitn(1, |b| *b == '=' as u8);
+                let key = Vec::from_slice(it.next().unwrap());
+                let val = Vec::from_slice(it.next().unwrap_or(&[]));
+                pairs.push((key, val));
             }
             pairs
         }
@@ -209,14 +314,47 @@ pub fn env() -> ~[(~str,~str)] {
 #[cfg(unix)]
 /// Fetches the environment variable `n` from the current process, returning
 /// None if the variable isn't set.
-pub fn getenv(n: &str) -> Option<~str> {
+///
+/// Any invalid UTF-8 bytes in the value are replaced by \uFFFD. See
+/// `str::from_utf8_lossy()` for details.
+///
+/// # Failure
+///
+/// Fails if `n` has any interior NULs.
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// let key = "HOME";
+/// match os::getenv(key) {
+///     Some(val) => println!("{}: {}", key, val),
+///     None => println!("{} is not defined in the environment.", key)
+/// }
+/// ```
+pub fn getenv(n: &str) -> Option<String> {
+    getenv_as_bytes(n).map(|v| String::from_str(str::from_utf8_lossy(v.as_slice()).as_slice()))
+}
+
+#[cfg(unix)]
+/// Fetches the environment variable `n` byte vector from the current process,
+/// returning None if the variable isn't set.
+///
+/// # Failure
+///
+/// Fails if `n` has any interior NULs.
+pub fn getenv_as_bytes(n: &str) -> Option<Vec<u8>> {
+    use c_str::CString;
+
     unsafe {
         with_env_lock(|| {
             let s = n.with_c_str(|buf| libc::getenv(buf));
             if s.is_null() {
                 None
             } else {
-                Some(str::raw::from_c_str(s))
+                Some(Vec::from_slice(CString::new(s as *const i8,
+                                                  false).as_bytes_no_nul()))
             }
         })
     }
@@ -225,53 +363,73 @@ pub fn getenv(n: &str) -> Option<~str> {
 #[cfg(windows)]
 /// Fetches the environment variable `n` from the current process, returning
 /// None if the variable isn't set.
-pub fn getenv(n: &str) -> Option<~str> {
+pub fn getenv(n: &str) -> Option<String> {
     unsafe {
         with_env_lock(|| {
-            use os::win32::{as_utf16_p, fill_utf16_buf_and_decode};
-            as_utf16_p(n, |u| {
-                fill_utf16_buf_and_decode(|buf, sz| {
-                    libc::GetEnvironmentVariableW(u, buf, sz)
-                })
+            use os::win32::{fill_utf16_buf_and_decode};
+            let n: Vec<u16> = n.utf16_units().collect();
+            let n = n.append_one(0);
+            fill_utf16_buf_and_decode(|buf, sz| {
+                libc::GetEnvironmentVariableW(n.as_ptr(), buf, sz)
             })
         })
     }
 }
-
-
-#[cfg(unix)]
-/// Sets the environment variable `n` to the value `v` for the currently running
-/// process
-pub fn setenv(n: &str, v: &str) {
-    unsafe {
-        with_env_lock(|| {
-            n.with_c_str(|nbuf| {
-                v.with_c_str(|vbuf| {
-                    libc::funcs::posix01::unistd::setenv(nbuf, vbuf, 1);
-                })
-            })
-        })
-    }
-}
-
 
 #[cfg(windows)]
-/// Sets the environment variable `n` to the value `v` for the currently running
-/// process
-pub fn setenv(n: &str, v: &str) {
-    unsafe {
-        with_env_lock(|| {
-            use os::win32::as_utf16_p;
-            as_utf16_p(n, |nbuf| {
-                as_utf16_p(v, |vbuf| {
-                    libc::SetEnvironmentVariableW(nbuf, vbuf);
-                })
-            })
-        })
-    }
+/// Fetches the environment variable `n` byte vector from the current process,
+/// returning None if the variable isn't set.
+pub fn getenv_as_bytes(n: &str) -> Option<Vec<u8>> {
+    getenv(n).map(|s| s.into_bytes())
 }
 
-/// Remove a variable from the environment entirely
+/// Sets the environment variable `n` to the value `v` for the currently running
+/// process.
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// let key = "KEY";
+/// os::setenv(key, "VALUE");
+/// match os::getenv(key) {
+///     Some(ref val) => println!("{}: {}", key, val),
+///     None => println!("{} is not defined in the environment.", key)
+/// }
+/// ```
+pub fn setenv<T: BytesContainer>(n: &str, v: T) {
+    #[cfg(unix)]
+    fn _setenv(n: &str, v: &[u8]) {
+        unsafe {
+            with_env_lock(|| {
+                n.with_c_str(|nbuf| {
+                    v.with_c_str(|vbuf| {
+                        libc::funcs::posix01::unistd::setenv(nbuf, vbuf, 1);
+                    })
+                })
+            })
+        }
+    }
+
+    #[cfg(windows)]
+    fn _setenv(n: &str, v: &[u8]) {
+        let n: Vec<u16> = n.utf16_units().collect();
+        let n = n.append_one(0);
+        let v: Vec<u16> = str::from_utf8(v).unwrap().utf16_units().collect();
+        let v = v.append_one(0);
+
+        unsafe {
+            with_env_lock(|| {
+                libc::SetEnvironmentVariableW(n.as_ptr(), v.as_ptr());
+            })
+        }
+    }
+
+    _setenv(n, v.container_as_bytes())
+}
+
+/// Remove a variable from the environment entirely.
 pub fn unsetenv(n: &str) {
     #[cfg(unix)]
     fn _unsetenv(n: &str) {
@@ -283,83 +441,238 @@ pub fn unsetenv(n: &str) {
             })
         }
     }
+
     #[cfg(windows)]
     fn _unsetenv(n: &str) {
+        let n: Vec<u16> = n.utf16_units().collect();
+        let n = n.append_one(0);
         unsafe {
             with_env_lock(|| {
-                use os::win32::as_utf16_p;
-                as_utf16_p(n, |nbuf| {
-                    libc::SetEnvironmentVariableW(nbuf, ptr::null());
-                })
+                libc::SetEnvironmentVariableW(n.as_ptr(), ptr::null());
             })
         }
     }
-
     _unsetenv(n);
 }
 
-pub struct Pipe {
-    input: c_int,
-    out: c_int
-}
-
-#[cfg(unix)]
-pub fn pipe() -> Pipe {
-    unsafe {
-        let mut fds = Pipe {input: 0,
-                            out: 0};
-        assert_eq!(libc::pipe(&mut fds.input), 0);
-        return Pipe {input: fds.input, out: fds.out};
+/// Parses input according to platform conventions for the `PATH`
+/// environment variable.
+///
+/// # Example
+/// ```rust
+/// use std::os;
+///
+/// let key = "PATH";
+/// match os::getenv_as_bytes(key) {
+///     Some(paths) => {
+///         for path in os::split_paths(paths).iter() {
+///             println!("'{}'", path.display());
+///         }
+///     }
+///     None => println!("{} is not defined in the environment.", key)
+/// }
+/// ```
+pub fn split_paths<T: BytesContainer>(unparsed: T) -> Vec<Path> {
+    #[cfg(unix)]
+    fn _split_paths<T: BytesContainer>(unparsed: T) -> Vec<Path> {
+        unparsed.container_as_bytes()
+                .split(|b| *b == b':')
+                .map(Path::new)
+                .collect()
     }
+
+    #[cfg(windows)]
+    fn _split_paths<T: BytesContainer>(unparsed: T) -> Vec<Path> {
+        // On Windows, the PATH environment variable is semicolon separated.  Double
+        // quotes are used as a way of introducing literal semicolons (since
+        // c:\some;dir is a valid Windows path). Double quotes are not themselves
+        // permitted in path names, so there is no way to escape a double quote.
+        // Quoted regions can appear in arbitrary locations, so
+        //
+        //   c:\foo;c:\som"e;di"r;c:\bar
+        //
+        // Should parse as [c:\foo, c:\some;dir, c:\bar].
+        //
+        // (The above is based on testing; there is no clear reference available
+        // for the grammar.)
+
+        let mut parsed = Vec::new();
+        let mut in_progress = Vec::new();
+        let mut in_quote = false;
+
+        for b in unparsed.container_as_bytes().iter() {
+            match *b {
+                b';' if !in_quote => {
+                    parsed.push(Path::new(in_progress.as_slice()));
+                    in_progress.truncate(0)
+                }
+                b'"' => {
+                    in_quote = !in_quote;
+                }
+                _  => {
+                    in_progress.push(*b);
+                }
+            }
+        }
+        parsed.push(Path::new(in_progress));
+        parsed
+    }
+
+    _split_paths(unparsed)
 }
 
-#[cfg(windows)]
-pub fn pipe() -> Pipe {
-    unsafe {
+/// Joins a collection of `Path`s appropriately for the `PATH`
+/// environment variable.
+///
+/// Returns a `Vec<u8>` on success, since `Path`s are not utf-8
+/// encoded on all platforms.
+///
+/// Returns an `Err` (containing an error message) if one of the input
+/// `Path`s contains an invalid character for constructing the `PATH`
+/// variable (a double quote on Windows or a colon on Unix).
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+/// use std::path::Path;
+///
+/// let key = "PATH";
+/// let mut paths = os::getenv_as_bytes(key).map_or(Vec::new(), os::split_paths);
+/// paths.push(Path::new("/home/xyz/bin"));
+/// os::setenv(key, os::join_paths(paths.as_slice()).unwrap());
+/// ```
+pub fn join_paths<T: BytesContainer>(paths: &[T]) -> Result<Vec<u8>, &'static str> {
+    #[cfg(windows)]
+    fn _join_paths<T: BytesContainer>(paths: &[T]) -> Result<Vec<u8>, &'static str> {
+        let mut joined = Vec::new();
+        let sep = b';';
+
+        for (i, path) in paths.iter().map(|p| p.container_as_bytes()).enumerate() {
+            if i > 0 { joined.push(sep) }
+            if path.contains(&b'"') {
+                return Err("path segment contains `\"`");
+            } else if path.contains(&sep) {
+                joined.push(b'"');
+                joined.push_all(path);
+                joined.push(b'"');
+            } else {
+                joined.push_all(path);
+            }
+        }
+
+        Ok(joined)
+    }
+
+    #[cfg(unix)]
+    fn _join_paths<T: BytesContainer>(paths: &[T]) -> Result<Vec<u8>, &'static str> {
+        let mut joined = Vec::new();
+        let sep = b':';
+
+        for (i, path) in paths.iter().map(|p| p.container_as_bytes()).enumerate() {
+            if i > 0 { joined.push(sep) }
+            if path.contains(&sep) { return Err("path segment contains separator `:`") }
+            joined.push_all(path);
+        }
+
+        Ok(joined)
+    }
+
+    _join_paths(paths)
+}
+
+/// A low-level OS in-memory pipe.
+pub struct Pipe {
+    /// A file descriptor representing the reading end of the pipe. Data written
+    /// on the `out` file descriptor can be read from this file descriptor.
+    pub reader: c_int,
+    /// A file descriptor representing the write end of the pipe. Data written
+    /// to this file descriptor can be read from the `input` file descriptor.
+    pub writer: c_int,
+}
+
+/// Creates a new low-level OS in-memory pipe.
+///
+/// This function can fail to succeed if there are no more resources available
+/// to allocate a pipe.
+///
+/// This function is also unsafe as there is no destructor associated with the
+/// `Pipe` structure will return. If it is not arranged for the returned file
+/// descriptors to be closed, the file descriptors will leak. For safe handling
+/// of this scenario, use `std::io::PipeStream` instead.
+pub unsafe fn pipe() -> IoResult<Pipe> {
+    return _pipe();
+
+    #[cfg(unix)]
+    unsafe fn _pipe() -> IoResult<Pipe> {
+        let mut fds = [0, ..2];
+        match libc::pipe(fds.as_mut_ptr()) {
+            0 => Ok(Pipe { reader: fds[0], writer: fds[1] }),
+            _ => Err(IoError::last_error()),
+        }
+    }
+
+    #[cfg(windows)]
+    unsafe fn _pipe() -> IoResult<Pipe> {
         // Windows pipes work subtly differently than unix pipes, and their
         // inheritance has to be handled in a different way that I do not
         // fully understand. Here we explicitly make the pipe non-inheritable,
         // which means to pass it to a subprocess they need to be duplicated
         // first, as in std::run.
-        let mut fds = Pipe {input: 0,
-                    out: 0};
-        let res = libc::pipe(&mut fds.input, 1024 as ::libc::c_uint,
-                             (libc::O_BINARY | libc::O_NOINHERIT) as c_int);
-        assert_eq!(res, 0);
-        assert!((fds.input != -1 && fds.input != 0 ));
-        assert!((fds.out != -1 && fds.input != 0));
-        return Pipe {input: fds.input, out: fds.out};
+        let mut fds = [0, ..2];
+        match libc::pipe(fds.as_mut_ptr(), 1024 as ::libc::c_uint,
+                         (libc::O_BINARY | libc::O_NOINHERIT) as c_int) {
+            0 => {
+                assert!(fds[0] != -1 && fds[0] != 0);
+                assert!(fds[1] != -1 && fds[1] != 0);
+                Ok(Pipe { reader: fds[0], writer: fds[1] })
+            }
+            _ => Err(IoError::last_error()),
+        }
     }
 }
 
-/// Returns the proper dll filename for the given basename of a file.
-pub fn dll_filename(base: &str) -> ~str {
+/// Returns the proper dll filename for the given basename of a file
+/// as a String.
+#[cfg(not(target_os="ios"))]
+pub fn dll_filename(base: &str) -> String {
     format!("{}{}{}", consts::DLL_PREFIX, base, consts::DLL_SUFFIX)
 }
 
-/// Optionally returns the filesystem path of the current executable which is
-/// running. If any failure occurs, None is returned.
+/// Optionally returns the filesystem path to the current executable which is
+/// running but with the executable name.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::os;
+///
+/// match os::self_exe_name() {
+///     Some(exe_path) => println!("Path of this executable is: {}", exe_path.display()),
+///     None => println!("Unable to get the path of this executable!")
+/// };
+/// ```
 pub fn self_exe_name() -> Option<Path> {
 
     #[cfg(target_os = "freebsd")]
-    fn load_self() -> Option<~[u8]> {
+    fn load_self() -> Option<Vec<u8>> {
         unsafe {
             use libc::funcs::bsd44::*;
             use libc::consts::os::extra::*;
-            use vec;
-            let mib = ~[CTL_KERN as c_int,
-                        KERN_PROC as c_int,
-                        KERN_PROC_PATHNAME as c_int, -1 as c_int];
+            let mut mib = vec![CTL_KERN as c_int,
+                               KERN_PROC as c_int,
+                               KERN_PROC_PATHNAME as c_int,
+                               -1 as c_int];
             let mut sz: libc::size_t = 0;
-            let err = sysctl(mib.as_ptr(), mib.len() as ::libc::c_uint,
-                             ptr::mut_null(), &mut sz, ptr::null(),
+            let err = sysctl(mib.as_mut_ptr(), mib.len() as ::libc::c_uint,
+                             ptr::mut_null(), &mut sz, ptr::mut_null(),
                              0u as libc::size_t);
             if err != 0 { return None; }
             if sz == 0 { return None; }
-            let mut v: ~[u8] = vec::with_capacity(sz as uint);
-            let err = sysctl(mib.as_ptr(), mib.len() as ::libc::c_uint,
-                             v.as_mut_ptr() as *mut c_void, &mut sz, ptr::null(),
-                             0u as libc::size_t);
+            let mut v: Vec<u8> = Vec::with_capacity(sz as uint);
+            let err = sysctl(mib.as_mut_ptr(), mib.len() as ::libc::c_uint,
+                             v.as_mut_ptr() as *mut c_void, &mut sz,
+                             ptr::mut_null(), 0u as libc::size_t);
             if err != 0 { return None; }
             if sz == 0 { return None; }
             v.set_len(sz as uint - 1); // chop off trailing NUL
@@ -369,24 +682,24 @@ pub fn self_exe_name() -> Option<Path> {
 
     #[cfg(target_os = "linux")]
     #[cfg(target_os = "android")]
-    fn load_self() -> Option<~[u8]> {
+    fn load_self() -> Option<Vec<u8>> {
         use std::io;
 
-        match io::result(|| io::fs::readlink(&Path::new("/proc/self/exe"))) {
-            Ok(Some(path)) => Some(path.as_vec().to_owned()),
-            Ok(None) | Err(..) => None
+        match io::fs::readlink(&Path::new("/proc/self/exe")) {
+            Ok(path) => Some(path.into_vec()),
+            Err(..) => None
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn load_self() -> Option<~[u8]> {
+    #[cfg(target_os = "ios")]
+    fn load_self() -> Option<Vec<u8>> {
         unsafe {
             use libc::funcs::extra::_NSGetExecutablePath;
-            use vec;
             let mut sz: u32 = 0;
             _NSGetExecutablePath(ptr::mut_null(), &mut sz);
             if sz == 0 { return None; }
-            let mut v: ~[u8] = vec::with_capacity(sz as uint);
+            let mut v: Vec<u8> = Vec::with_capacity(sz as uint);
             let err = _NSGetExecutablePath(v.as_mut_ptr() as *mut i8, &mut sz);
             if err != 0 { return None; }
             v.set_len(sz as uint - 1); // chop off trailing NUL
@@ -395,12 +708,14 @@ pub fn self_exe_name() -> Option<Path> {
     }
 
     #[cfg(windows)]
-    fn load_self() -> Option<~[u8]> {
+    fn load_self() -> Option<Vec<u8>> {
+        use str::OwnedStr;
+
         unsafe {
             use os::win32::fill_utf16_buf_and_decode;
             fill_utf16_buf_and_decode(|buf, sz| {
                 libc::GetModuleFileNameW(0u as libc::DWORD, buf, sz)
-            }).map(|s| s.into_bytes())
+            }).map(|s| s.into_string().into_bytes())
         }
     }
 
@@ -408,56 +723,80 @@ pub fn self_exe_name() -> Option<Path> {
 }
 
 /// Optionally returns the filesystem path to the current executable which is
-/// running. Like self_exe_name() but without the binary's name.
-/// If any failure occurs, None is returned.
+/// running.
+///
+/// Like self_exe_name() but without the binary's name.
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// match os::self_exe_path() {
+///     Some(exe_path) => println!("Executable's Path is: {}", exe_path.display()),
+///     None => println!("Impossible to fetch the path of this executable.")
+/// };
+/// ```
 pub fn self_exe_path() -> Option<Path> {
     self_exe_name().map(|mut p| { p.pop(); p })
 }
 
-/**
- * Returns the path to the user's home directory, if known.
- *
- * On Unix, returns the value of the 'HOME' environment variable if it is set
- * and not equal to the empty string.
- *
- * On Windows, returns the value of the 'HOME' environment variable if it is
- * set and not equal to the empty string. Otherwise, returns the value of the
- * 'USERPROFILE' environment variable if it is set and not equal to the empty
- * string.
- *
- * Otherwise, homedir returns option::none.
- */
+/// Optionally returns the path to the current user's home directory if known.
+///
+/// # Unix
+///
+/// Returns the value of the 'HOME' environment variable if it is set
+/// and not equal to the empty string.
+///
+/// # Windows
+///
+/// Returns the value of the 'HOME' environment variable if it is
+/// set and not equal to the empty string. Otherwise, returns the value of the
+/// 'USERPROFILE' environment variable if it is set and not equal to the empty
+/// string.
+///
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// match os::homedir() {
+///     Some(ref p) => println!("{}", p.display()),
+///     None => println!("Impossible to get your home dir!")
+/// }
+/// ```
 pub fn homedir() -> Option<Path> {
-    // FIXME (#7188): getenv needs a ~[u8] variant
-    return match getenv("HOME") {
-        Some(ref p) if !p.is_empty() => Path::new_opt(p.as_slice()),
-        _ => secondary()
-    };
-
+    #[inline]
     #[cfg(unix)]
-    fn secondary() -> Option<Path> {
-        None
+    fn _homedir() -> Option<Path> {
+        aux_homedir("HOME")
     }
 
+    #[inline]
     #[cfg(windows)]
-    fn secondary() -> Option<Path> {
-        getenv("USERPROFILE").and_then(|p| {
-            if !p.is_empty() {
-                Path::new_opt(p)
-            } else {
-                None
-            }
-        })
+    fn _homedir() -> Option<Path> {
+        aux_homedir("HOME").or(aux_homedir("USERPROFILE"))
     }
+
+    #[inline]
+    fn aux_homedir(home_name: &str) -> Option<Path> {
+        match getenv_as_bytes(home_name) {
+            Some(p)  => {
+                if p.is_empty() { None } else { Path::new_opt(p) }
+            },
+            _ => None
+        }
+    }
+    _homedir()
 }
 
 /**
  * Returns the path to a temporary directory.
  *
  * On Unix, returns the value of the 'TMPDIR' environment variable if it is
- * set and non-empty and '/tmp' otherwise.
- * On Android, there is no global temporary folder (it is usually allocated
- * per-app), hence returns '/data/tmp' which is commonly used.
+ * set, otherwise for non-Android it returns '/tmp'. If Android, since there
+ * is no global temporary folder (it is usually allocated per-app), we return
+ * '/data/local/tmp'.
  *
  * On Windows, returns the value of, in order, the 'TMP', 'TEMP',
  * 'USERPROFILE' environment variable  if any are set and not the empty
@@ -480,11 +819,13 @@ pub fn tmpdir() -> Path {
 
     #[cfg(unix)]
     fn lookup() -> Path {
-        if cfg!(target_os = "android") {
-            Path::new("/data/tmp")
+        let default = if cfg!(target_os = "android") {
+            Path::new("/data/local/tmp")
         } else {
-            getenv_nonempty("TMPDIR").unwrap_or(Path::new("/tmp"))
-        }
+            Path::new("/tmp")
+        };
+
+        getenv_nonempty("TMPDIR").unwrap_or(default)
     }
 
     #[cfg(windows)]
@@ -496,13 +837,24 @@ pub fn tmpdir() -> Path {
     }
 }
 
-/**
- * Convert a relative path to an absolute path
- *
- * If the given path is relative, return it prepended with the current working
- * directory. If the given path is already an absolute path, return it
- * as is.
- */
+///
+/// Convert a relative path to an absolute path
+///
+/// If the given path is relative, return it prepended with the current working
+/// directory. If the given path is already an absolute path, return it
+/// as is.
+///
+/// # Example
+/// ```rust
+/// use std::os;
+/// use std::path::Path;
+///
+/// // Assume we're in a path like /home/someuser
+/// let rel_path = Path::new("..");
+/// let abs_path = os::make_absolute(&rel_path);
+/// println!("The absolute path is {}", abs_path.display());
+/// // Prints "The absolute path is /home"
+/// ```
 // NB: this is here rather than in path because it is a form of environment
 // querying; what it does depends on the process working directory, not just
 // the input paths.
@@ -518,16 +870,27 @@ pub fn make_absolute(p: &Path) -> Path {
 
 /// Changes the current working directory to the specified path, returning
 /// whether the change was completed successfully or not.
+///
+/// # Example
+/// ```rust
+/// use std::os;
+/// use std::path::Path;
+///
+/// let root = Path::new("/");
+/// assert!(os::change_dir(&root));
+/// println!("Succesfully changed working directory to {}!", root.display());
+/// ```
 pub fn change_dir(p: &Path) -> bool {
     return chdir(p);
 
     #[cfg(windows)]
     fn chdir(p: &Path) -> bool {
+        let p = match p.as_str() {
+            Some(s) => s.utf16_units().collect::<Vec<u16>>().append_one(0),
+            None => return false,
+        };
         unsafe {
-            use os::win32::as_utf16_p;
-            return as_utf16_p(p.as_str().unwrap(), |buf| {
-                libc::SetCurrentDirectoryW(buf) != (0 as libc::BOOL)
-            });
+            libc::SetCurrentDirectoryW(p.as_ptr()) != (0 as libc::BOOL)
         }
     }
 
@@ -545,11 +908,11 @@ pub fn change_dir(p: &Path) -> bool {
 /// Returns the platform-specific value of errno
 pub fn errno() -> int {
     #[cfg(target_os = "macos")]
+    #[cfg(target_os = "ios")]
     #[cfg(target_os = "freebsd")]
-    fn errno_location() -> *c_int {
-        #[nolink]
+    fn errno_location() -> *const c_int {
         extern {
-            fn __error() -> *c_int;
+            fn __error() -> *const c_int;
         }
         unsafe {
             __error()
@@ -558,10 +921,9 @@ pub fn errno() -> int {
 
     #[cfg(target_os = "linux")]
     #[cfg(target_os = "android")]
-    fn errno_location() -> *c_int {
-        #[nolink]
+    fn errno_location() -> *const c_int {
         extern {
-            fn __errno_location() -> *c_int;
+            fn __errno_location() -> *const c_int;
         }
         unsafe {
             __errno_location()
@@ -588,16 +950,25 @@ pub fn errno() -> uint {
     }
 }
 
-/// Get a string representing the platform-dependent last error
-pub fn last_os_error() -> ~str {
+/// Return the string corresponding to an `errno()` value of `errnum`.
+/// # Example
+/// ```rust
+/// use std::os;
+///
+/// // Same as println!("{}", last_os_error());
+/// println!("{}", os::error_string(os::errno() as uint));
+/// ```
+pub fn error_string(errnum: uint) -> String {
+    return strerror(errnum);
+
     #[cfg(unix)]
-    fn strerror() -> ~str {
+    fn strerror(errnum: uint) -> String {
         #[cfg(target_os = "macos")]
+        #[cfg(target_os = "ios")]
         #[cfg(target_os = "android")]
         #[cfg(target_os = "freebsd")]
         fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: libc::size_t)
                       -> c_int {
-            #[nolink]
             extern {
                 fn strerror_r(errnum: c_int, buf: *mut c_char,
                               buflen: libc::size_t) -> c_int;
@@ -613,7 +984,6 @@ pub fn last_os_error() -> ~str {
         #[cfg(target_os = "linux")]
         fn strerror_r(errnum: c_int, buf: *mut c_char,
                       buflen: libc::size_t) -> c_int {
-            #[nolink]
             extern {
                 fn __xpg_strerror_r(errnum: c_int,
                                     buf: *mut c_char,
@@ -629,16 +999,16 @@ pub fn last_os_error() -> ~str {
 
         let p = buf.as_mut_ptr();
         unsafe {
-            if strerror_r(errno() as c_int, p, buf.len() as libc::size_t) < 0 {
+            if strerror_r(errnum as c_int, p, buf.len() as libc::size_t) < 0 {
                 fail!("strerror_r failure");
             }
 
-            str::raw::from_c_str(p as *c_char)
+            str::raw::from_c_str(p as *const c_char).into_string()
         }
     }
 
     #[cfg(windows)]
-    fn strerror() -> ~str {
+    fn strerror(errnum: uint) -> String {
         use libc::types::os::arch::extra::DWORD;
         use libc::types::os::arch::extra::LPWSTR;
         use libc::types::os::arch::extra::LPVOID;
@@ -652,7 +1022,7 @@ pub fn last_os_error() -> ~str {
                               langId: DWORD,
                               buf: LPWSTR,
                               nsize: DWORD,
-                              args: *c_void)
+                              args: *const c_void)
                               -> DWORD;
         }
 
@@ -662,7 +1032,6 @@ pub fn last_os_error() -> ~str {
         // This value is calculated from the macro
         // MAKELANGID(LANG_SYSTEM_DEFAULT, SUBLANG_SYS_DEFAULT)
         let langId = 0x0800 as DWORD;
-        let err = errno() as DWORD;
 
         let mut buf = [0 as WCHAR, ..TMPBUF_SZ];
 
@@ -670,20 +1039,29 @@ pub fn last_os_error() -> ~str {
             let res = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM |
                                      FORMAT_MESSAGE_IGNORE_INSERTS,
                                      ptr::mut_null(),
-                                     err,
+                                     errnum as DWORD,
                                      langId,
                                      buf.as_mut_ptr(),
                                      buf.len() as DWORD,
                                      ptr::null());
             if res == 0 {
-                fail!("[{}] FormatMessage failure", errno());
+                // Sometimes FormatMessageW can fail e.g. system doesn't like langId,
+                let fm_err = errno();
+                return format!("OS Error {} (FormatMessageW() returned error {})", errnum, fm_err);
             }
 
-            str::from_utf16(buf)
+            let msg = str::from_utf16(str::truncate_utf16_at_nul(buf));
+            match msg {
+                Some(msg) => format!("OS Error {}: {}", errnum, msg),
+                None => format!("OS Error {} (FormatMessageW() returned invalid UTF-16)", errnum),
+            }
         }
     }
+}
 
-    strerror()
+/// Get a string representing the platform-dependent last error
+pub fn last_os_error() -> String {
+    error_string(errno() as uint)
 }
 
 static mut EXIT_STATUS: AtomicInt = INIT_ATOMIC_INT;
@@ -709,12 +1087,14 @@ pub fn get_exit_status() -> int {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn load_argc_and_argv(argc: int, argv: **c_char) -> ~[~str] {
-    let mut args = ~[];
-    for i in range(0u, argc as uint) {
-        args.push(str::raw::from_c_str(*argv.offset(i as int)));
-    }
-    args
+unsafe fn load_argc_and_argv(argc: int,
+                             argv: *const *const c_char) -> Vec<Vec<u8>> {
+    use c_str::CString;
+
+    Vec::from_fn(argc as uint, |i| {
+        Vec::from_slice(CString::new(*argv.offset(i as int),
+                                     false).as_bytes_no_nul())
+    })
 }
 
 /**
@@ -723,18 +1103,77 @@ unsafe fn load_argc_and_argv(argc: int, argv: **c_char) -> ~[~str] {
  * Returns a list of the command line arguments.
  */
 #[cfg(target_os = "macos")]
-fn real_args() -> ~[~str] {
+fn real_args_as_bytes() -> Vec<Vec<u8>> {
     unsafe {
         let (argc, argv) = (*_NSGetArgc() as int,
-                            *_NSGetArgv() as **c_char);
+                            *_NSGetArgv() as *const *const c_char);
         load_argc_and_argv(argc, argv)
     }
+}
+
+// As _NSGetArgc and _NSGetArgv aren't mentioned in iOS docs
+// and use underscores in their names - they're most probably
+// are considered private and therefore should be avoided
+// Here is another way to get arguments using Objective C
+// runtime
+//
+// In general it looks like:
+// res = Vec::new()
+// let args = [[NSProcessInfo processInfo] arguments]
+// for i in range(0, [args count])
+//      res.push([args objectAtIndex:i])
+// res
+#[cfg(target_os = "ios")]
+fn real_args_as_bytes() -> Vec<Vec<u8>> {
+    use c_str::CString;
+    use iter::range;
+    use mem;
+
+    #[link(name = "objc")]
+    extern {
+        fn sel_registerName(name: *const libc::c_uchar) -> Sel;
+        fn objc_msgSend(obj: NsId, sel: Sel, ...) -> NsId;
+        fn objc_getClass(class_name: *const libc::c_uchar) -> NsId;
+    }
+
+    #[link(name = "Foundation", kind = "framework")]
+    extern {}
+
+    type Sel = *const libc::c_void;
+    type NsId = *const libc::c_void;
+
+    let mut res = Vec::new();
+
+    unsafe {
+        let processInfoSel = sel_registerName("processInfo\0".as_ptr());
+        let argumentsSel = sel_registerName("arguments\0".as_ptr());
+        let utf8Sel = sel_registerName("UTF8String\0".as_ptr());
+        let countSel = sel_registerName("count\0".as_ptr());
+        let objectAtSel = sel_registerName("objectAtIndex:\0".as_ptr());
+
+        let klass = objc_getClass("NSProcessInfo\0".as_ptr());
+        let info = objc_msgSend(klass, processInfoSel);
+        let args = objc_msgSend(info, argumentsSel);
+
+        let cnt: int = mem::transmute(objc_msgSend(args, countSel));
+        for i in range(0, cnt) {
+            let tmp = objc_msgSend(args, objectAtSel, i);
+            let utf_c_str: *const libc::c_char =
+                mem::transmute(objc_msgSend(tmp, utf8Sel));
+            let s = CString::new(utf_c_str, false);
+            if s.is_not_null() {
+                res.push(Vec::from_slice(s.as_bytes_no_nul()))
+            }
+        }
+    }
+
+    res
 }
 
 #[cfg(target_os = "linux")]
 #[cfg(target_os = "android")]
 #[cfg(target_os = "freebsd")]
-fn real_args() -> ~[~str] {
+fn real_args_as_bytes() -> Vec<Vec<u8>> {
     use rt;
 
     match rt::args::clone() {
@@ -743,62 +1182,94 @@ fn real_args() -> ~[~str] {
     }
 }
 
+#[cfg(not(windows))]
+fn real_args() -> Vec<String> {
+    real_args_as_bytes().move_iter()
+                        .map(|v| {
+                            str::from_utf8_lossy(v.as_slice()).into_string()
+                        }).collect()
+}
+
 #[cfg(windows)]
-fn real_args() -> ~[~str] {
-    use vec;
+fn real_args() -> Vec<String> {
+    use slice;
 
     let mut nArgs: c_int = 0;
     let lpArgCount: *mut c_int = &mut nArgs;
     let lpCmdLine = unsafe { GetCommandLineW() };
     let szArgList = unsafe { CommandLineToArgvW(lpCmdLine, lpArgCount) };
 
-    let mut args = ~[];
-    for i in range(0u, nArgs as uint) {
-        unsafe {
-            // Determine the length of this argument.
-            let ptr = *szArgList.offset(i as int);
-            let mut len = 0;
-            while *ptr.offset(len as int) != 0 { len += 1; }
+    let args = Vec::from_fn(nArgs as uint, |i| unsafe {
+        // Determine the length of this argument.
+        let ptr = *szArgList.offset(i as int);
+        let mut len = 0;
+        while *ptr.offset(len as int) != 0 { len += 1; }
 
-            // Push it onto the list.
-            args.push(vec::raw::buf_as_slice(ptr, len,
-                                             str::from_utf16));
-        }
-    }
+        // Push it onto the list.
+        let opt_s = slice::raw::buf_as_slice(ptr as *const _, len, |buf| {
+            str::from_utf16(str::truncate_utf16_at_nul(buf))
+        });
+        opt_s.expect("CommandLineToArgvW returned invalid UTF-16")
+    });
 
     unsafe {
-        LocalFree(szArgList as *c_void);
+        LocalFree(szArgList as *mut c_void);
     }
 
-    return args;
+    return args
 }
 
-type LPCWSTR = *u16;
+#[cfg(windows)]
+fn real_args_as_bytes() -> Vec<Vec<u8>> {
+    real_args().move_iter().map(|s| s.into_bytes()).collect()
+}
+
+type LPCWSTR = *const u16;
 
 #[cfg(windows)]
 #[link_name="kernel32"]
 extern "system" {
     fn GetCommandLineW() -> LPCWSTR;
-    fn LocalFree(ptr: *c_void);
+    fn LocalFree(ptr: *mut c_void);
 }
 
 #[cfg(windows)]
 #[link_name="shell32"]
 extern "system" {
-    fn CommandLineToArgvW(lpCmdLine: LPCWSTR, pNumArgs: *mut c_int) -> **u16;
+    fn CommandLineToArgvW(lpCmdLine: LPCWSTR,
+                          pNumArgs: *mut c_int) -> *mut *mut u16;
 }
 
 /// Returns the arguments which this program was started with (normally passed
 /// via the command line).
-pub fn args() -> ~[~str] {
+///
+/// The arguments are interpreted as utf-8, with invalid bytes replaced with \uFFFD.
+/// See `str::from_utf8_lossy` for details.
+/// # Example
+///
+/// ```rust
+/// use std::os;
+///
+/// // Prints each argument on a separate line
+/// for argument in os::args().iter() {
+///     println!("{}", argument);
+/// }
+/// ```
+pub fn args() -> Vec<String> {
     real_args()
+}
+
+/// Returns the arguments which this program was started with (normally passed
+/// via the command line) as byte vectors.
+pub fn args_as_bytes() -> Vec<Vec<u8>> {
+    real_args_as_bytes()
 }
 
 #[cfg(target_os = "macos")]
 extern {
     // These functions are in crt_externs.h.
-    pub fn _NSGetArgc() -> *c_int;
-    pub fn _NSGetArgv() -> ***c_char;
+    pub fn _NSGetArgc() -> *mut c_int;
+    pub fn _NSGetArgv() -> *mut *mut *mut c_char;
 }
 
 // Round up `from` to be divisible by `to`
@@ -815,6 +1286,7 @@ fn round_up(from: uint, to: uint) -> uint {
     }
 }
 
+/// Returns the page size of the current architecture in bytes.
 #[cfg(unix)]
 pub fn page_size() -> uint {
     unsafe {
@@ -822,10 +1294,12 @@ pub fn page_size() -> uint {
     }
 }
 
+/// Returns the page size of the current architecture in bytes.
 #[cfg(windows)]
 pub fn page_size() -> uint {
+    use mem;
     unsafe {
-        let mut info = libc::SYSTEM_INFO::new();
+        let mut info = mem::zeroed();
         libc::GetSystemInfo(&mut info);
 
         return info.dwPageSize as uint;
@@ -841,19 +1315,16 @@ pub fn page_size() -> uint {
 /// The memory map is released (unmapped) when the destructor is run, so don't
 /// let it leave scope by accident if you want it to stick around.
 pub struct MemoryMap {
-    /// Pointer to the memory created or modified by this map.
     data: *mut u8,
-    /// Number of bytes this map applies to
     len: uint,
-    /// Type of mapping
-    kind: MemoryMapKind
+    kind: MemoryMapKind,
 }
 
 /// Type of memory map
 pub enum MemoryMapKind {
     /// Virtual memory map. Usually used to change the permissions of a given
     /// chunk of memory.  Corresponds to `VirtualAlloc` on Windows.
-    MapFile(*u8),
+    MapFile(*const u8),
     /// Virtual memory map. Usually used to change the permissions of a given
     /// chunk of memory, or for allocation. Corresponds to `VirtualAlloc` on
     /// Windows.
@@ -870,7 +1341,7 @@ pub enum MapOption {
     MapExecutable,
     /// Create a map for a specific address range. Corresponds to `MAP_FIXED` on
     /// POSIX.
-    MapAddr(*u8),
+    MapAddr(*const u8),
     /// Create a memory mapping for a file with a given fd.
     MapFd(c_int),
     /// When using `MapFd`, the start of the map is `uint` bytes from the start
@@ -928,9 +1399,9 @@ pub enum MapError {
     ErrMapViewOfFile(uint)
 }
 
-impl fmt::Default for MapError {
-    fn fmt(val: &MapError, out: &mut fmt::Formatter) {
-        let str = match *val {
+impl fmt::Show for MapError {
+    fn fmt(&self, out: &mut fmt::Formatter) -> fmt::Result {
+        let str = match *self {
             ErrFdNotAvail => "fd not available for reading or writing",
             ErrInvalidFd => "Invalid fd",
             ErrUnaligned => {
@@ -944,23 +1415,19 @@ impl fmt::Default for MapError {
             ErrAlreadyExists => "File mapping for specified file already exists",
             ErrZeroLength => "Zero-length mapping not allowed",
             ErrUnknown(code) => {
-                write!(out.buf, "Unknown error = {}", code);
-                return
+                return write!(out, "Unknown error = {}", code)
             },
             ErrVirtualAlloc(code) => {
-                write!(out.buf, "VirtualAlloc failure = {}", code);
-                return
+                return write!(out, "VirtualAlloc failure = {}", code)
             },
             ErrCreateFileMappingW(code) => {
-                format!("CreateFileMappingW failure = {}", code);
-                return
+                return write!(out, "CreateFileMappingW failure = {}", code)
             },
             ErrMapViewOfFile(code) => {
-                write!(out.buf, "MapViewOfFile failure = {}", code);
-                return
+                return write!(out, "MapViewOfFile failure = {}", code)
             }
         };
-        write!(out.buf, "{}", str);
+        write!(out, "{}", str)
     }
 }
 
@@ -975,7 +1442,7 @@ impl MemoryMap {
         if min_len == 0 {
             return Err(ErrZeroLength)
         }
-        let mut addr: *u8 = ptr::null();
+        let mut addr: *const u8 = ptr::null();
         let mut prot = 0;
         let mut flags = libc::MAP_PRIVATE;
         let mut fd = -1;
@@ -1003,10 +1470,10 @@ impl MemoryMap {
         if fd == -1 && !custom_flags { flags |= libc::MAP_ANON; }
 
         let r = unsafe {
-            libc::mmap(addr as *c_void, len as libc::size_t, prot, flags, fd,
-                       offset)
+            libc::mmap(addr as *mut c_void, len as libc::size_t, prot, flags,
+                       fd, offset)
         };
-        if r.equiv(&libc::MAP_FAILED) {
+        if r == libc::MAP_FAILED {
             Err(match errno() as c_int {
                 libc::EACCES => ErrFdNotAvail,
                 libc::EBADF => ErrInvalidFd,
@@ -1042,14 +1509,8 @@ impl Drop for MemoryMap {
         if self.len == 0 { /* workaround for dummy_stack */ return; }
 
         unsafe {
-            match libc::munmap(self.data as *c_void, self.len as libc::size_t) {
-                0 => (),
-                -1 => match errno() as c_int {
-                    libc::EINVAL => error!("invalid addr or len"),
-                    e => error!("unknown errno={}", e)
-                },
-                r => error!("Unexpected result {}", r)
-            }
+            // `munmap` only fails due to logic errors
+            libc::munmap(self.data as *mut c_void, self.len as libc::size_t);
         }
     }
 }
@@ -1076,10 +1537,7 @@ impl MemoryMap {
                 MapAddr(addr_) => { lpAddress = addr_ as LPVOID; },
                 MapFd(fd_) => { fd = fd_; },
                 MapOffset(offset_) => { offset = offset_; },
-                MapNonStandardFlags(f) => {
-                    info!("MemoryMap::new: MapNonStandardFlags used on \
-                           Windows: {}", f)
-                }
+                MapNonStandardFlags(..) => {}
             }
         }
 
@@ -1144,7 +1602,7 @@ impl MemoryMap {
                     _ => Ok(MemoryMap {
                        data: r as *mut u8,
                        len: len,
-                       kind: MapFile(mapping as *u8)
+                       kind: MapFile(mapping as *const u8)
                     })
                 }
             }
@@ -1154,8 +1612,9 @@ impl MemoryMap {
     /// Granularity of MapAddr() and MapOffset() parameter values.
     /// This may be greater than the value returned by page_size().
     pub fn granularity() -> uint {
+        use mem;
         unsafe {
-            let mut info = libc::SYSTEM_INFO::new();
+            let mut info = mem::zeroed();
             libc::GetSystemInfo(&mut info);
 
             return info.dwAllocationGranularity as uint;
@@ -1177,15 +1636,15 @@ impl Drop for MemoryMap {
                 MapVirtual => {
                     if libc::VirtualFree(self.data as *mut c_void, 0,
                                          libc::MEM_RELEASE) == 0 {
-                        error!("VirtualFree failed: {}", errno());
+                        println!("VirtualFree failed: {}", errno());
                     }
                 },
                 MapFile(mapping) => {
                     if libc::UnmapViewOfFile(self.data as LPCVOID) == FALSE {
-                        error!("UnmapViewOfFile failed: {}", errno());
+                        println!("UnmapViewOfFile failed: {}", errno());
                     }
                     if libc::CloseHandle(mapping as HANDLE) == FALSE {
-                        error!("CloseHandle failed: {}", errno());
+                        println!("CloseHandle failed: {}", errno());
                     }
                 }
             }
@@ -1193,107 +1652,212 @@ impl Drop for MemoryMap {
     }
 }
 
+impl MemoryMap {
+    /// Returns the pointer to the memory created or modified by this map.
+    pub fn data(&self) -> *mut u8 { self.data }
+    /// Returns the number of bytes this map applies to.
+    pub fn len(&self) -> uint { self.len }
+    /// Returns the type of mapping this represents.
+    pub fn kind(&self) -> MemoryMapKind { self.kind }
+}
+
+#[cfg(target_os = "linux")]
 pub mod consts {
+    pub use os::arch_consts::ARCH;
 
-    #[cfg(unix)]
-    pub use os::consts::unix::*;
+    pub static FAMILY: &'static str = "unix";
 
-    #[cfg(windows)]
-    pub use os::consts::windows::*;
+    /// A string describing the specific operating system in use: in this
+    /// case, `linux`.
+    pub static SYSNAME: &'static str = "linux";
 
-    #[cfg(target_os = "macos")]
-    pub use os::consts::macos::*;
+    /// Specifies the filename prefix used for shared libraries on this
+    /// platform: in this case, `lib`.
+    pub static DLL_PREFIX: &'static str = "lib";
 
-    #[cfg(target_os = "freebsd")]
-    pub use os::consts::freebsd::*;
+    /// Specifies the filename suffix used for shared libraries on this
+    /// platform: in this case, `.so`.
+    pub static DLL_SUFFIX: &'static str = ".so";
 
-    #[cfg(target_os = "linux")]
-    pub use os::consts::linux::*;
+    /// Specifies the file extension used for shared libraries on this
+    /// platform that goes after the dot: in this case, `so`.
+    pub static DLL_EXTENSION: &'static str = "so";
 
-    #[cfg(target_os = "android")]
-    pub use os::consts::android::*;
+    /// Specifies the filename suffix used for executable binaries on this
+    /// platform: in this case, the empty string.
+    pub static EXE_SUFFIX: &'static str = "";
 
-    #[cfg(target_os = "win32")]
-    pub use os::consts::win32::*;
+    /// Specifies the file extension, if any, used for executable binaries
+    /// on this platform: in this case, the empty string.
+    pub static EXE_EXTENSION: &'static str = "";
+}
 
-    #[cfg(target_arch = "x86")]
-    pub use os::consts::x86::*;
+#[cfg(target_os = "macos")]
+pub mod consts {
+    pub use os::arch_consts::ARCH;
 
-    #[cfg(target_arch = "x86_64")]
-    pub use os::consts::x86_64::*;
+    pub static FAMILY: &'static str = "unix";
 
-    #[cfg(target_arch = "arm")]
-    pub use os::consts::arm::*;
+    /// A string describing the specific operating system in use: in this
+    /// case, `macos`.
+    pub static SYSNAME: &'static str = "macos";
 
-    #[cfg(target_arch = "mips")]
-    pub use os::consts::mips::*;
+    /// Specifies the filename prefix used for shared libraries on this
+    /// platform: in this case, `lib`.
+    pub static DLL_PREFIX: &'static str = "lib";
 
-    pub mod unix {
-        pub static FAMILY: &'static str = "unix";
-    }
+    /// Specifies the filename suffix used for shared libraries on this
+    /// platform: in this case, `.dylib`.
+    pub static DLL_SUFFIX: &'static str = ".dylib";
 
-    pub mod windows {
-        pub static FAMILY: &'static str = "windows";
-    }
+    /// Specifies the file extension used for shared libraries on this
+    /// platform that goes after the dot: in this case, `dylib`.
+    pub static DLL_EXTENSION: &'static str = "dylib";
 
-    pub mod macos {
-        pub static SYSNAME: &'static str = "macos";
-        pub static DLL_PREFIX: &'static str = "lib";
-        pub static DLL_SUFFIX: &'static str = ".dylib";
-        pub static DLL_EXTENSION: &'static str = "dylib";
-        pub static EXE_SUFFIX: &'static str = "";
-        pub static EXE_EXTENSION: &'static str = "";
-    }
+    /// Specifies the filename suffix used for executable binaries on this
+    /// platform: in this case, the empty string.
+    pub static EXE_SUFFIX: &'static str = "";
 
-    pub mod freebsd {
-        pub static SYSNAME: &'static str = "freebsd";
-        pub static DLL_PREFIX: &'static str = "lib";
-        pub static DLL_SUFFIX: &'static str = ".so";
-        pub static DLL_EXTENSION: &'static str = "so";
-        pub static EXE_SUFFIX: &'static str = "";
-        pub static EXE_EXTENSION: &'static str = "";
-    }
+    /// Specifies the file extension, if any, used for executable binaries
+    /// on this platform: in this case, the empty string.
+    pub static EXE_EXTENSION: &'static str = "";
+}
 
-    pub mod linux {
-        pub static SYSNAME: &'static str = "linux";
-        pub static DLL_PREFIX: &'static str = "lib";
-        pub static DLL_SUFFIX: &'static str = ".so";
-        pub static DLL_EXTENSION: &'static str = "so";
-        pub static EXE_SUFFIX: &'static str = "";
-        pub static EXE_EXTENSION: &'static str = "";
-    }
+#[cfg(target_os = "ios")]
+pub mod consts {
+    pub use os::arch_consts::ARCH;
 
-    pub mod android {
-        pub static SYSNAME: &'static str = "android";
-        pub static DLL_PREFIX: &'static str = "lib";
-        pub static DLL_SUFFIX: &'static str = ".so";
-        pub static DLL_EXTENSION: &'static str = "so";
-        pub static EXE_SUFFIX: &'static str = "";
-        pub static EXE_EXTENSION: &'static str = "";
-    }
+    pub static FAMILY: &'static str = "unix";
 
-    pub mod win32 {
-        pub static SYSNAME: &'static str = "win32";
-        pub static DLL_PREFIX: &'static str = "";
-        pub static DLL_SUFFIX: &'static str = ".dll";
-        pub static DLL_EXTENSION: &'static str = "dll";
-        pub static EXE_SUFFIX: &'static str = ".exe";
-        pub static EXE_EXTENSION: &'static str = "exe";
-    }
+    /// A string describing the specific operating system in use: in this
+    /// case, `ios`.
+    pub static SYSNAME: &'static str = "ios";
 
+    /// Specifies the filename suffix used for executable binaries on this
+    /// platform: in this case, the empty string.
+    pub static EXE_SUFFIX: &'static str = "";
 
-    pub mod x86 {
-        pub static ARCH: &'static str = "x86";
-    }
-    pub mod x86_64 {
-        pub static ARCH: &'static str = "x86_64";
-    }
-    pub mod arm {
-        pub static ARCH: &'static str = "arm";
-    }
-    pub mod mips {
-        pub static ARCH: &'static str = "mips";
-    }
+    /// Specifies the file extension, if any, used for executable binaries
+    /// on this platform: in this case, the empty string.
+    pub static EXE_EXTENSION: &'static str = "";
+}
+
+#[cfg(target_os = "freebsd")]
+pub mod consts {
+    pub use os::arch_consts::ARCH;
+
+    pub static FAMILY: &'static str = "unix";
+
+    /// A string describing the specific operating system in use: in this
+    /// case, `freebsd`.
+    pub static SYSNAME: &'static str = "freebsd";
+
+    /// Specifies the filename prefix used for shared libraries on this
+    /// platform: in this case, `lib`.
+    pub static DLL_PREFIX: &'static str = "lib";
+
+    /// Specifies the filename suffix used for shared libraries on this
+    /// platform: in this case, `.so`.
+    pub static DLL_SUFFIX: &'static str = ".so";
+
+    /// Specifies the file extension used for shared libraries on this
+    /// platform that goes after the dot: in this case, `so`.
+    pub static DLL_EXTENSION: &'static str = "so";
+
+    /// Specifies the filename suffix used for executable binaries on this
+    /// platform: in this case, the empty string.
+    pub static EXE_SUFFIX: &'static str = "";
+
+    /// Specifies the file extension, if any, used for executable binaries
+    /// on this platform: in this case, the empty string.
+    pub static EXE_EXTENSION: &'static str = "";
+}
+
+#[cfg(target_os = "android")]
+pub mod consts {
+    pub use os::arch_consts::ARCH;
+
+    pub static FAMILY: &'static str = "unix";
+
+    /// A string describing the specific operating system in use: in this
+    /// case, `android`.
+    pub static SYSNAME: &'static str = "android";
+
+    /// Specifies the filename prefix used for shared libraries on this
+    /// platform: in this case, `lib`.
+    pub static DLL_PREFIX: &'static str = "lib";
+
+    /// Specifies the filename suffix used for shared libraries on this
+    /// platform: in this case, `.so`.
+    pub static DLL_SUFFIX: &'static str = ".so";
+
+    /// Specifies the file extension used for shared libraries on this
+    /// platform that goes after the dot: in this case, `so`.
+    pub static DLL_EXTENSION: &'static str = "so";
+
+    /// Specifies the filename suffix used for executable binaries on this
+    /// platform: in this case, the empty string.
+    pub static EXE_SUFFIX: &'static str = "";
+
+    /// Specifies the file extension, if any, used for executable binaries
+    /// on this platform: in this case, the empty string.
+    pub static EXE_EXTENSION: &'static str = "";
+}
+
+#[cfg(target_os = "win32")]
+pub mod consts {
+    pub use os::arch_consts::ARCH;
+
+    pub static FAMILY: &'static str = "windows";
+
+    /// A string describing the specific operating system in use: in this
+    /// case, `win32`.
+    pub static SYSNAME: &'static str = "win32";
+
+    /// Specifies the filename prefix used for shared libraries on this
+    /// platform: in this case, the empty string.
+    pub static DLL_PREFIX: &'static str = "";
+
+    /// Specifies the filename suffix used for shared libraries on this
+    /// platform: in this case, `.dll`.
+    pub static DLL_SUFFIX: &'static str = ".dll";
+
+    /// Specifies the file extension used for shared libraries on this
+    /// platform that goes after the dot: in this case, `dll`.
+    pub static DLL_EXTENSION: &'static str = "dll";
+
+    /// Specifies the filename suffix used for executable binaries on this
+    /// platform: in this case, `.exe`.
+    pub static EXE_SUFFIX: &'static str = ".exe";
+
+    /// Specifies the file extension, if any, used for executable binaries
+    /// on this platform: in this case, `exe`.
+    pub static EXE_EXTENSION: &'static str = "exe";
+}
+
+#[cfg(target_arch = "x86")]
+mod arch_consts {
+    pub static ARCH: &'static str = "x86";
+}
+
+#[cfg(target_arch = "x86_64")]
+mod arch_consts {
+    pub static ARCH: &'static str = "x86_64";
+}
+
+#[cfg(target_arch = "arm")]
+mod arch_consts {
+    pub static ARCH: &'static str = "arm";
+}
+
+#[cfg(target_arch = "mips")]
+mod arch_consts {
+    pub static ARCH: &'static str = "mips";
+}
+
+#[cfg(target_arch = "mipsel")]
+mod arch_consts {
+    pub static ARCH: &'static str = "mipsel";
 }
 
 #[cfg(test)]
@@ -1301,55 +1865,54 @@ mod tests {
     use prelude::*;
     use c_str::ToCStr;
     use option;
-    use os::{env, getcwd, getenv, make_absolute, args};
-    use os::{setenv, unsetenv};
+    use os::{env, getcwd, getenv, make_absolute};
+    use os::{split_paths, join_paths, setenv, unsetenv};
     use os;
     use rand::Rng;
     use rand;
-
 
     #[test]
     pub fn last_os_error() {
         debug!("{}", os::last_os_error());
     }
 
-    #[test]
-    pub fn test_args() {
-        let a = args();
-        assert!(a.len() >= 1);
+    fn make_rand_name() -> String {
+        let mut rng = rand::task_rng();
+        let n = format!("TEST{}", rng.gen_ascii_chars().take(10u)
+                                     .collect::<String>());
+        assert!(getenv(n.as_slice()).is_none());
+        n
     }
 
-    fn make_rand_name() -> ~str {
-        let mut rng = rand::rng();
-        let n = ~"TEST" + rng.gen_ascii_str(10u);
-        assert!(getenv(n).is_none());
-        n
+    #[test]
+    fn test_num_cpus() {
+        assert!(os::num_cpus() > 0);
     }
 
     #[test]
     fn test_setenv() {
         let n = make_rand_name();
-        setenv(n, "VALUE");
-        assert_eq!(getenv(n), option::Some(~"VALUE"));
+        setenv(n.as_slice(), "VALUE");
+        assert_eq!(getenv(n.as_slice()), option::Some("VALUE".to_string()));
     }
 
     #[test]
     fn test_unsetenv() {
         let n = make_rand_name();
-        setenv(n, "VALUE");
-        unsetenv(n);
-        assert_eq!(getenv(n), option::None);
+        setenv(n.as_slice(), "VALUE");
+        unsetenv(n.as_slice());
+        assert_eq!(getenv(n.as_slice()), option::None);
     }
 
     #[test]
     #[ignore]
     fn test_setenv_overwrite() {
         let n = make_rand_name();
-        setenv(n, "1");
-        setenv(n, "2");
-        assert_eq!(getenv(n), option::Some(~"2"));
-        setenv(n, "");
-        assert_eq!(getenv(n), option::Some(~""));
+        setenv(n.as_slice(), "1");
+        setenv(n.as_slice(), "2");
+        assert_eq!(getenv(n.as_slice()), option::Some("2".to_string()));
+        setenv(n.as_slice(), "");
+        assert_eq!(getenv(n.as_slice()), option::Some("".to_string()));
     }
 
     // Windows GetEnvironmentVariable requires some extra work to make sure
@@ -1357,16 +1920,16 @@ mod tests {
     #[test]
     #[ignore]
     fn test_getenv_big() {
-        let mut s = ~"";
-        let mut i = 0;
+        let mut s = "".to_string();
+        let mut i = 0i;
         while i < 100 {
-            s = s + "aaaaaaaaaa";
+            s.push_str("aaaaaaaaaa");
             i += 1;
         }
         let n = make_rand_name();
-        setenv(n, s);
+        setenv(n.as_slice(), s.as_slice());
         debug!("{}", s.clone());
-        assert_eq!(getenv(n), option::Some(s));
+        assert_eq!(getenv(n.as_slice()), option::Some(s));
     }
 
     #[test]
@@ -1399,7 +1962,7 @@ mod tests {
         for p in e.iter() {
             let (n, v) = (*p).clone();
             debug!("{:?}", n.clone());
-            let v2 = getenv(n);
+            let v2 = getenv(n.as_slice());
             // MingW seems to set some funky environment variables like
             // "=C:=C:\MinGW\msys\1.0\bin" and "!::=::\" that are returned
             // from env() but not visible from getenv().
@@ -1408,15 +1971,25 @@ mod tests {
     }
 
     #[test]
+    fn test_env_set_get_huge() {
+        let n = make_rand_name();
+        let s = "x".repeat(10000).to_string();
+        setenv(n.as_slice(), s.as_slice());
+        assert_eq!(getenv(n.as_slice()), Some(s));
+        unsetenv(n.as_slice());
+        assert_eq!(getenv(n.as_slice()), None);
+    }
+
+    #[test]
     fn test_env_setenv() {
         let n = make_rand_name();
 
         let mut e = env();
-        setenv(n, "VALUE");
-        assert!(!e.contains(&(n.clone(), ~"VALUE")));
+        setenv(n.as_slice(), "VALUE");
+        assert!(!e.contains(&(n.clone(), "VALUE".to_string())));
 
         e = env();
-        assert!(e.contains(&(n, ~"VALUE")));
+        assert!(e.contains(&(n, "VALUE".to_string())));
     }
 
     #[test]
@@ -1436,12 +2009,14 @@ mod tests {
         let oldhome = getenv("HOME");
 
         setenv("HOME", "/home/MountainView");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
         setenv("HOME", "");
         assert!(os::homedir().is_none());
 
-        for s in oldhome.iter() { setenv("HOME", *s) }
+        for s in oldhome.iter() {
+            setenv("HOME", s.as_slice());
+        }
     }
 
     #[test]
@@ -1457,19 +2032,23 @@ mod tests {
         assert!(os::homedir().is_none());
 
         setenv("HOME", "/home/MountainView");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
         setenv("HOME", "");
 
         setenv("USERPROFILE", "/home/MountainView");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
         setenv("HOME", "/home/MountainView");
         setenv("USERPROFILE", "/home/PaloAlto");
-        assert_eq!(os::homedir(), Some(Path::new("/home/MountainView")));
+        assert!(os::homedir() == Some(Path::new("/home/MountainView")));
 
-        for s in oldhome.iter() { setenv("HOME", *s) }
-        for s in olduserprofile.iter() { setenv("USERPROFILE", *s) }
+        for s in oldhome.iter() {
+            setenv("HOME", s.as_slice());
+        }
+        for s in olduserprofile.iter() {
+            setenv("USERPROFILE", s.as_slice());
+        }
     }
 
     #[test]
@@ -1496,7 +2075,6 @@ mod tests {
         use result::{Ok, Err};
         use os::*;
         use libc::*;
-        use io;
         use io::fs;
 
         #[cfg(unix)]
@@ -1521,7 +2099,7 @@ mod tests {
                 open(path, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR)
             });
             lseek_(fd, size);
-            "x".with_c_str(|x| assert!(write(fd, x as *c_void, 1) == 1));
+            "x".with_c_str(|x| assert!(write(fd, x as *const c_void, 1) == 1));
             fd
         };
         let chunk = match MemoryMap::new(size / 2, [
@@ -1540,9 +2118,76 @@ mod tests {
             assert!(*chunk.data == 0xbe);
             close(fd);
         }
+        drop(chunk);
 
-        let _guard = io::ignore_io_error();
-        fs::unlink(&path);
+        fs::unlink(&path).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn split_paths_windows() {
+        fn check_parse(unparsed: &str, parsed: &[&str]) -> bool {
+            split_paths(unparsed) ==
+                parsed.iter().map(|s| Path::new(*s)).collect()
+        }
+
+        assert!(check_parse("", [""]));
+        assert!(check_parse(r#""""#, [""]));
+        assert!(check_parse(";;", ["", "", ""]));
+        assert!(check_parse(r"c:\", [r"c:\"]));
+        assert!(check_parse(r"c:\;", [r"c:\", ""]));
+        assert!(check_parse(r"c:\;c:\Program Files\",
+                            [r"c:\", r"c:\Program Files\"]));
+        assert!(check_parse(r#"c:\;c:\"foo"\"#, [r"c:\", r"c:\foo\"]));
+        assert!(check_parse(r#"c:\;c:\"foo;bar"\;c:\baz"#,
+                            [r"c:\", r"c:\foo;bar\", r"c:\baz"]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn split_paths_unix() {
+        fn check_parse(unparsed: &str, parsed: &[&str]) -> bool {
+            split_paths(unparsed) ==
+                parsed.iter().map(|s| Path::new(*s)).collect()
+        }
+
+        assert!(check_parse("", [""]));
+        assert!(check_parse("::", ["", "", ""]));
+        assert!(check_parse("/", ["/"]));
+        assert!(check_parse("/:", ["/", ""]));
+        assert!(check_parse("/:/usr/local", ["/", "/usr/local"]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn join_paths_unix() {
+        fn test_eq(input: &[&str], output: &str) -> bool {
+            join_paths(input).unwrap().as_slice() == output.as_bytes()
+        }
+
+        assert!(test_eq([], ""));
+        assert!(test_eq(["/bin", "/usr/bin", "/usr/local/bin"],
+                        "/bin:/usr/bin:/usr/local/bin"));
+        assert!(test_eq(["", "/bin", "", "", "/usr/bin", ""],
+                        ":/bin:::/usr/bin:"));
+        assert!(join_paths(["/te:st"]).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn join_paths_windows() {
+        fn test_eq(input: &[&str], output: &str) -> bool {
+            join_paths(input).unwrap().as_slice() == output.as_bytes()
+        }
+
+        assert!(test_eq([], ""));
+        assert!(test_eq([r"c:\windows", r"c:\"],
+                        r"c:\windows;c:\"));
+        assert!(test_eq(["", r"c:\windows", "", "", r"c:\", ""],
+                        r";c:\windows;;;c:\;"));
+        assert!(test_eq([r"c:\te;st", r"c:\"],
+                        r#""c:\te;st";c:\"#));
+        assert!(join_paths([r#"c:\te"st"#]).is_err());
     }
 
     // More recursive_mkdir tests are in extra::tempfile

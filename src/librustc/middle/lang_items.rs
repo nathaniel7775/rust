@@ -13,7 +13,7 @@
 // Language items are items that represent concepts intrinsic to the language
 // itself. Examples are:
 //
-// * Traits that specify "kinds"; e.g. "Freeze", "Send".
+// * Traits that specify "kinds"; e.g. "Share", "Send".
 //
 // * Traits that represent operators; e.g. "Add", "Sub", "Index".
 //
@@ -22,116 +22,107 @@
 
 use driver::session::Session;
 use metadata::csearch::each_lang_item;
-use middle::ty::{BuiltinBound, BoundFreeze, BoundPod, BoundSend, BoundSized};
+use middle::ty;
+use middle::weak_lang_items;
 use syntax::ast;
 use syntax::ast_util::local_def;
 use syntax::attr::AttrMetaMethods;
-use syntax::visit;
+use syntax::parse::token::InternedString;
 use syntax::visit::Visitor;
+use syntax::visit;
 
-use std::hashmap::HashMap;
+use std::collections::HashMap;
 use std::iter::Enumerate;
-use std::vec;
-
-
-// Get the last "argument" (has to be done recursively to avoid phoney local ambiguity error)
-macro_rules! last {
-    ( $first:expr, $( $remainder:expr, )+ ) => ( last!( $( $remainder, )+ ) );
-    ( $first:expr, ) => ( $first )
-}
+use std::slice;
 
 // The actual lang items defined come at the end of this file in one handy table.
 // So you probably just want to nip down to the end.
 macro_rules! lets_do_this {
-    // secondary rule to allow us to use `$num` as both an expression
-    // and a pattern.
     (
-        $( $num:tt, $variant:ident, $name:expr, $method:ident; )*
-    ) => {
-        lets_do_this!(count = 1 + last!($($num,)*),
-                      $($num, $variant, $name, $method; )*)
-    };
-
-    (
-        count = $num_lang_items:expr, $( $num:pat, $variant:ident, $name:expr, $method:ident; )*
+        $( $variant:ident, $name:expr, $method:ident; )*
     ) => {
 
+#[deriving(FromPrimitive, PartialEq, Eq, Hash)]
 pub enum LangItem {
     $($variant),*
 }
 
 pub struct LanguageItems {
-    items: [Option<ast::DefId>, ..$num_lang_items]
+    pub items: Vec<Option<ast::DefId>>,
+    pub missing: Vec<LangItem>,
 }
 
 impl LanguageItems {
     pub fn new() -> LanguageItems {
+        fn foo(_: LangItem) -> Option<ast::DefId> { None }
+
         LanguageItems {
-            items: [ None, ..$num_lang_items ]
+            items: vec!($(foo($variant)),*),
+            missing: Vec::new(),
         }
     }
 
-    pub fn items<'a>(&'a self) -> Enumerate<vec::Items<'a, Option<ast::DefId>>> {
+    pub fn items<'a>(&'a self) -> Enumerate<slice::Items<'a, Option<ast::DefId>>> {
         self.items.iter().enumerate()
     }
 
     pub fn item_name(index: uint) -> &'static str {
-        match index {
-            $( $num => $name, )*
-            _ => "???"
+        let item: Option<LangItem> = FromPrimitive::from_uint(index);
+        match item {
+            $( Some($variant) => $name, )*
+            None => "???"
         }
     }
 
-    pub fn require(&self, it: LangItem) -> Result<ast::DefId, ~str> {
-        match self.items[it as uint] {
-            Some(id) => Ok(id),
-            None => Err(format!("requires `{}` lang_item",
-                             LanguageItems::item_name(it as uint)))
+    pub fn require(&self, it: LangItem) -> Result<ast::DefId, String> {
+        match self.items.get(it as uint) {
+            &Some(id) => Ok(id),
+            &None => {
+                Err(format!("requires `{}` lang_item",
+                            LanguageItems::item_name(it as uint)))
+            }
         }
     }
 
-    pub fn to_builtin_kind(&self, id: ast::DefId) -> Option<BuiltinBound> {
-        if Some(id) == self.freeze_trait() {
-            Some(BoundFreeze)
-        } else if Some(id) == self.send_trait() {
-            Some(BoundSend)
+    pub fn to_builtin_kind(&self, id: ast::DefId) -> Option<ty::BuiltinBound> {
+        if Some(id) == self.send_trait() {
+            Some(ty::BoundSend)
         } else if Some(id) == self.sized_trait() {
-            Some(BoundSized)
-        } else if Some(id) == self.pod_trait() {
-            Some(BoundPod)
+            Some(ty::BoundSized)
+        } else if Some(id) == self.copy_trait() {
+            Some(ty::BoundCopy)
+        } else if Some(id) == self.share_trait() {
+            Some(ty::BoundShare)
         } else {
             None
         }
     }
 
     $(
+        #[allow(dead_code)]
         pub fn $method(&self) -> Option<ast::DefId> {
-            self.items[$variant as uint]
+            *self.items.get($variant as uint)
         }
     )*
 }
 
-struct LanguageItemCollector {
+struct LanguageItemCollector<'a> {
     items: LanguageItems,
 
-    session: Session,
+    session: &'a Session,
 
     item_refs: HashMap<&'static str, uint>,
 }
 
-struct LanguageItemVisitor<'a> {
-    this: &'a mut LanguageItemCollector,
-}
-
-impl<'a> Visitor<()> for LanguageItemVisitor<'a> {
+impl<'a> Visitor<()> for LanguageItemCollector<'a> {
     fn visit_item(&mut self, item: &ast::Item, _: ()) {
-        match extract(item.attrs) {
+        match extract(item.attrs.as_slice()) {
             Some(value) => {
-                let item_index = self.this.item_refs.find_equiv(&value).map(|x| *x);
+                let item_index = self.item_refs.find_equiv(&value).map(|x| *x);
 
                 match item_index {
                     Some(item_index) => {
-                        self.this.collect_item(item_index, local_def(item.id))
+                        self.collect_item(item_index, local_def(item.id))
                     }
                     None => {}
                 }
@@ -143,8 +134,8 @@ impl<'a> Visitor<()> for LanguageItemVisitor<'a> {
     }
 }
 
-impl LanguageItemCollector {
-    pub fn new(session: Session) -> LanguageItemCollector {
+impl<'a> LanguageItemCollector<'a> {
+    pub fn new(session: &'a Session) -> LanguageItemCollector<'a> {
         let mut item_refs = HashMap::new();
 
         $( item_refs.insert($name, $variant as uint); )*
@@ -158,61 +149,61 @@ impl LanguageItemCollector {
 
     pub fn collect_item(&mut self, item_index: uint, item_def_id: ast::DefId) {
         // Check for duplicates.
-        match self.items.items[item_index] {
-            Some(original_def_id) if original_def_id != item_def_id => {
+        match self.items.items.get(item_index) {
+            &Some(original_def_id) if original_def_id != item_def_id => {
                 self.session.err(format!("duplicate entry for `{}`",
-                                      LanguageItems::item_name(item_index)));
+                                         LanguageItems::item_name(
+                                             item_index)).as_slice());
             }
-            Some(_) | None => {
+            &Some(_) | &None => {
                 // OK.
             }
         }
 
         // Matched.
-        self.items.items[item_index] = Some(item_def_id);
+        *self.items.items.get_mut(item_index) = Some(item_def_id);
     }
 
-    pub fn collect_local_language_items(&mut self, crate: &ast::Crate) {
-        let mut v = LanguageItemVisitor { this: self };
-        visit::walk_crate(&mut v, crate, ());
+    pub fn collect_local_language_items(&mut self, krate: &ast::Crate) {
+        visit::walk_crate(self, krate, ());
     }
 
     pub fn collect_external_language_items(&mut self) {
-        let crate_store = self.session.cstore;
+        let crate_store = &self.session.cstore;
         crate_store.iter_crate_data(|crate_number, _crate_metadata| {
             each_lang_item(crate_store, crate_number, |node_id, item_index| {
-                let def_id = ast::DefId { crate: crate_number, node: node_id };
+                let def_id = ast::DefId { krate: crate_number, node: node_id };
                 self.collect_item(item_index, def_id);
                 true
             });
         })
     }
 
-    pub fn collect(&mut self, crate: &ast::Crate) {
-        self.collect_local_language_items(crate);
+    pub fn collect(&mut self, krate: &ast::Crate) {
+        self.collect_local_language_items(krate);
         self.collect_external_language_items();
     }
 }
 
-pub fn extract(attrs: &[ast::Attribute]) -> Option<@str> {
+pub fn extract(attrs: &[ast::Attribute]) -> Option<InternedString> {
     for attribute in attrs.iter() {
-        match attribute.name_str_pair() {
-            Some((key, value)) if "lang" == key => {
-                return Some(value);
+        match attribute.value_str() {
+            Some(ref value) if attribute.check_name("lang") => {
+                return Some(value.clone());
             }
-            Some(..) | None => {}
+            _ => {}
         }
     }
 
     return None;
 }
 
-pub fn collect_language_items(crate: &ast::Crate,
-                              session: Session)
-                           -> LanguageItems {
+pub fn collect_language_items(krate: &ast::Crate,
+                              session: &Session) -> LanguageItems {
     let mut collector = LanguageItemCollector::new(session);
-    collector.collect(crate);
-    let LanguageItemCollector { items, .. } = collector;
+    collector.collect(krate);
+    let LanguageItemCollector { mut items, .. } = collector;
+    weak_lang_items::check_crate(krate, session, &mut items);
     session.abort_if_errors();
     items
 }
@@ -222,55 +213,90 @@ pub fn collect_language_items(crate: &ast::Crate,
 }
 
 lets_do_this! {
-//  ID, Variant name,                    Name,                      Method name;
-    0,  FreezeTraitLangItem,             "freeze",                  freeze_trait;
-    1,  SendTraitLangItem,               "send",                    send_trait;
-    2,  SizedTraitLangItem,              "sized",                   sized_trait;
-    3,  PodTraitLangItem,                "pod",                     pod_trait;
+//  Variant name,                    Name,                      Method name;
+    SendTraitLangItem,               "send",                    send_trait;
+    SizedTraitLangItem,              "sized",                   sized_trait;
+    CopyTraitLangItem,               "copy",                    copy_trait;
+    ShareTraitLangItem,              "share",                   share_trait;
 
-    4,  DropTraitLangItem,               "drop",                    drop_trait;
+    DropTraitLangItem,               "drop",                    drop_trait;
 
-    5,  AddTraitLangItem,                "add",                     add_trait;
-    6,  SubTraitLangItem,                "sub",                     sub_trait;
-    7,  MulTraitLangItem,                "mul",                     mul_trait;
-    8,  DivTraitLangItem,                "div",                     div_trait;
-    9,  RemTraitLangItem,                "rem",                     rem_trait;
-    10, NegTraitLangItem,                "neg",                     neg_trait;
-    11, NotTraitLangItem,                "not",                     not_trait;
-    12, BitXorTraitLangItem,             "bitxor",                  bitxor_trait;
-    13, BitAndTraitLangItem,             "bitand",                  bitand_trait;
-    14, BitOrTraitLangItem,              "bitor",                   bitor_trait;
-    15, ShlTraitLangItem,                "shl",                     shl_trait;
-    16, ShrTraitLangItem,                "shr",                     shr_trait;
-    17, IndexTraitLangItem,              "index",                   index_trait;
+    AddTraitLangItem,                "add",                     add_trait;
+    SubTraitLangItem,                "sub",                     sub_trait;
+    MulTraitLangItem,                "mul",                     mul_trait;
+    DivTraitLangItem,                "div",                     div_trait;
+    RemTraitLangItem,                "rem",                     rem_trait;
+    NegTraitLangItem,                "neg",                     neg_trait;
+    NotTraitLangItem,                "not",                     not_trait;
+    BitXorTraitLangItem,             "bitxor",                  bitxor_trait;
+    BitAndTraitLangItem,             "bitand",                  bitand_trait;
+    BitOrTraitLangItem,              "bitor",                   bitor_trait;
+    ShlTraitLangItem,                "shl",                     shl_trait;
+    ShrTraitLangItem,                "shr",                     shr_trait;
+    IndexTraitLangItem,              "index",                   index_trait;
+    IndexMutTraitLangItem,           "index_mut",               index_mut_trait;
 
-    18, EqTraitLangItem,                 "eq",                      eq_trait;
-    19, OrdTraitLangItem,                "ord",                     ord_trait;
+    UnsafeTypeLangItem,              "unsafe",                  unsafe_type;
 
-    20, StrEqFnLangItem,                 "str_eq",                  str_eq_fn;
-    21, UniqStrEqFnLangItem,             "uniq_str_eq",             uniq_str_eq_fn;
-    22, FailFnLangItem,                  "fail_",                   fail_fn;
-    23, FailBoundsCheckFnLangItem,       "fail_bounds_check",       fail_bounds_check_fn;
-    24, ExchangeMallocFnLangItem,        "exchange_malloc",         exchange_malloc_fn;
-    25, ClosureExchangeMallocFnLangItem, "closure_exchange_malloc", closure_exchange_malloc_fn;
-    26, ExchangeFreeFnLangItem,          "exchange_free",           exchange_free_fn;
-    27, MallocFnLangItem,                "malloc",                  malloc_fn;
-    28, FreeFnLangItem,                  "free",                    free_fn;
-    29, StrDupUniqFnLangItem,            "strdup_uniq",             strdup_uniq_fn;
+    DerefTraitLangItem,              "deref",                   deref_trait;
+    DerefMutTraitLangItem,           "deref_mut",               deref_mut_trait;
 
-    30, StartFnLangItem,                 "start",                   start_fn;
+    FnTraitLangItem,                 "fn",                      fn_trait;
+    FnMutTraitLangItem,              "fn_mut",                  fn_mut_trait;
+    FnOnceTraitLangItem,             "fn_once",                 fn_once_trait;
 
-    31, TyDescStructLangItem,            "ty_desc",                 ty_desc;
-    32, TyVisitorTraitLangItem,          "ty_visitor",              ty_visitor;
-    33, OpaqueStructLangItem,            "opaque",                  opaque;
+    EqTraitLangItem,                 "eq",                      eq_trait;
+    OrdTraitLangItem,                "ord",                     ord_trait;
 
-    34, EventLoopFactoryLangItem,        "event_loop_factory",      event_loop_factory;
+    StrEqFnLangItem,                 "str_eq",                  str_eq_fn;
 
-    35, TypeIdLangItem,                  "type_id",                 type_id;
+    // A number of failure-related lang items. The `fail_` item corresponds to
+    // divide-by-zero and various failure cases with `match`. The
+    // `fail_bounds_check` item is for indexing arrays.
+    //
+    // The `begin_unwind` lang item has a predefined symbol name and is sort of
+    // a "weak lang item" in the sense that a crate is not required to have it
+    // defined to use it, but a final product is required to define it
+    // somewhere. Additionally, there are restrictions on crates that use a weak
+    // lang item, but do not have it defined.
+    FailFnLangItem,                  "fail_",                   fail_fn;
+    FailBoundsCheckFnLangItem,       "fail_bounds_check",       fail_bounds_check_fn;
+    BeginUnwindLangItem,             "begin_unwind",            begin_unwind;
 
-    36, EhPersonalityLangItem,           "eh_personality",          eh_personality_fn;
+    ExchangeMallocFnLangItem,        "exchange_malloc",         exchange_malloc_fn;
+    ClosureExchangeMallocFnLangItem, "closure_exchange_malloc", closure_exchange_malloc_fn;
+    ExchangeFreeFnLangItem,          "exchange_free",           exchange_free_fn;
+    MallocFnLangItem,                "malloc",                  malloc_fn;
+    FreeFnLangItem,                  "free",                    free_fn;
+    StrDupUniqFnLangItem,            "strdup_uniq",             strdup_uniq_fn;
 
-    37, ManagedHeapLangItem,             "managed_heap",            managed_heap;
-    38, ExchangeHeapLangItem,            "exchange_heap",           exchange_heap;
-    39, GcLangItem,                      "gc",                      gc;
+    StartFnLangItem,                 "start",                   start_fn;
+
+    TyDescStructLangItem,            "ty_desc",                 ty_desc;
+    TyVisitorTraitLangItem,          "ty_visitor",              ty_visitor;
+    OpaqueStructLangItem,            "opaque",                  opaque;
+
+    TypeIdLangItem,                  "type_id",                 type_id;
+
+    EhPersonalityLangItem,           "eh_personality",          eh_personality;
+
+    ManagedHeapLangItem,             "managed_heap",            managed_heap;
+    ExchangeHeapLangItem,            "exchange_heap",           exchange_heap;
+    GcLangItem,                      "gc",                      gc;
+    OwnedBoxLangItem,                "owned_box",               owned_box;
+
+    CovariantTypeItem,               "covariant_type",          covariant_type;
+    ContravariantTypeItem,           "contravariant_type",      contravariant_type;
+    InvariantTypeItem,               "invariant_type",          invariant_type;
+
+    CovariantLifetimeItem,           "covariant_lifetime",      covariant_lifetime;
+    ContravariantLifetimeItem,       "contravariant_lifetime",  contravariant_lifetime;
+    InvariantLifetimeItem,           "invariant_lifetime",      invariant_lifetime;
+
+    NoSendItem,                      "no_send_bound",           no_send_bound;
+    NoCopyItem,                      "no_copy_bound",           no_copy_bound;
+    NoShareItem,                     "no_share_bound",          no_share_bound;
+    ManagedItem,                     "managed_bound",           managed_bound;
+
+    StackExhaustedLangItem,          "stack_exhausted",         stack_exhausted;
 }

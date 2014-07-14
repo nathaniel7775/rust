@@ -8,12 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-fn main() {
+extern crate debug;
 
-    let y: ~int = ~42;
-    let mut x: ~int;
+fn main() {
+    let y: Box<int> = box 42;
+    let mut x: Box<int>;
     loop {
-        info!("{:?}", y); //~ ERROR use of moved value: `y`
+        println!("{:?}", y); //~ ERROR use of moved value: `y`
         while true { while true { while true { x = y; x.clone(); } } }
         //~^ ERROR use of moved value: `y`
     }

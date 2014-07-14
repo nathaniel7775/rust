@@ -14,38 +14,39 @@
 // either genuine or would require more advanced changes.  The latter
 // cases are noted.
 
+
 fn borrow(_v: &int) {}
 fn borrow_mut(_v: &mut int) {}
 fn cond() -> bool { fail!() }
 fn for_func(_f: || -> bool) { fail!() }
 fn produce<T>() -> T { fail!(); }
 
-fn inc(v: &mut ~int) {
-    *v = ~(**v + 1);
+fn inc(v: &mut Box<int>) {
+    *v = box() (**v + 1);
 }
 
 fn pre_freeze_cond() {
     // In this instance, the freeze is conditional and starts before
     // the mut borrow.
 
-    let mut v = ~3;
+    let mut v = box 3;
     let _w;
     if cond() {
         _w = &v;
     }
-    borrow_mut(v); //~ ERROR cannot borrow
+    borrow_mut(&mut *v); //~ ERROR cannot borrow
 }
 
 fn pre_freeze_else() {
     // In this instance, the freeze and mut borrow are on separate sides
     // of the if.
 
-    let mut v = ~3;
+    let mut v = box 3;
     let _w;
     if cond() {
         _w = &v;
     } else {
-        borrow_mut(v);
+        borrow_mut(&mut *v);
     }
 }
 

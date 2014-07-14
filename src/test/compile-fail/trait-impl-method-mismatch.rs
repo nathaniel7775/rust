@@ -8,16 +8,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
+
+use std::gc::Gc;
 
 trait Mumbo {
-    fn jumbo(&self, x: @uint) -> uint;
+    fn jumbo(&self, x: Gc<uint>) -> uint;
 }
 
 impl Mumbo for uint {
     // Cannot have a larger effect than the trait:
-    unsafe fn jumbo(&self, x: @uint) { *self + *x; }
-    //~^ ERROR expected impure fn but found unsafe fn
+    unsafe fn jumbo(&self, x: Gc<uint>) { *self + *x; }
+    //~^ ERROR expected normal fn but found unsafe fn
 }
 
 fn main() {}

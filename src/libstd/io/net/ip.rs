@@ -8,58 +8,65 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use container::Container;
+//! Internet Protocol (IP) addresses.
+//!
+//! This module contains functions useful for parsing, formatting, and
+//! manipulating IP addresses.
+
+#![allow(missing_doc)]
+
+use collections::Collection;
+use fmt;
 use from_str::FromStr;
 use iter::Iterator;
 use option::{Option, None, Some};
 use str::StrSlice;
-use to_str::ToStr;
-use vec::{MutableCloneableVector, ImmutableVector, MutableVector};
+use slice::{MutableCloneableVector, ImmutableVector, MutableVector};
 
 pub type Port = u16;
 
-#[deriving(Eq, TotalEq, Clone)]
+#[deriving(PartialEq, Eq, Clone, Hash)]
 pub enum IpAddr {
     Ipv4Addr(u8, u8, u8, u8),
     Ipv6Addr(u16, u16, u16, u16, u16, u16, u16, u16)
 }
 
-impl ToStr for IpAddr {
-    fn to_str(&self) -> ~str {
+impl fmt::Show for IpAddr {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Ipv4Addr(a, b, c, d) =>
-                format!("{}.{}.{}.{}", a, b, c, d),
+                write!(fmt, "{}.{}.{}.{}", a, b, c, d),
 
             // Ipv4 Compatible address
             Ipv6Addr(0, 0, 0, 0, 0, 0, g, h) => {
-                format!("::{}.{}.{}.{}", (g >> 8) as u8, g as u8,
-                        (h >> 8) as u8, h as u8)
+                write!(fmt, "::{}.{}.{}.{}", (g >> 8) as u8, g as u8,
+                       (h >> 8) as u8, h as u8)
             }
 
             // Ipv4-Mapped address
             Ipv6Addr(0, 0, 0, 0, 0, 0xFFFF, g, h) => {
-                format!("::FFFF:{}.{}.{}.{}", (g >> 8) as u8, g as u8,
-                        (h >> 8) as u8, h as u8)
+                write!(fmt, "::FFFF:{}.{}.{}.{}", (g >> 8) as u8, g as u8,
+                       (h >> 8) as u8, h as u8)
             }
 
             Ipv6Addr(a, b, c, d, e, f, g, h) =>
-                format!("{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}", a, b, c, d, e, f, g, h)
+                write!(fmt, "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
+                       a, b, c, d, e, f, g, h)
         }
     }
 }
 
-#[deriving(Eq, TotalEq, Clone)]
+#[deriving(PartialEq, Eq, Clone, Hash)]
 pub struct SocketAddr {
-    ip: IpAddr,
-    port: Port,
+    pub ip: IpAddr,
+    pub port: Port,
 }
 
-
-impl ToStr for SocketAddr {
-    fn to_str(&self) -> ~str {
+impl fmt::Show for SocketAddr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.ip {
-            Ipv4Addr(..) => format!("{}:{}", self.ip.to_str(), self.port),
-            Ipv6Addr(..) => format!("[{}]:{}", self.ip.to_str(), self.port),
+            Ipv4Addr(..) => write!(f, "{}:{}", self.ip, self.port),
+            Ipv6Addr(..) => write!(f, "[{}]:{}", self.ip, self.port),
         }
     }
 }
@@ -100,9 +107,9 @@ impl<'a> Parser<'a> {
     }
 
     // Return result of first successful parser
-    fn read_or<T>(&mut self, parsers: &[|&mut Parser| -> Option<T>])
+    fn read_or<T>(&mut self, parsers: &mut [|&mut Parser| -> Option<T>])
                -> Option<T> {
-        for pf in parsers.iter() {
+        for pf in parsers.mut_iter() {
             match self.read_atomically(|p: &mut Parser| (*pf)(p)) {
                 Some(r) => return Some(r),
                 None => {}
@@ -298,7 +305,7 @@ impl<'a> Parser<'a> {
     fn read_ip_addr(&mut self) -> Option<IpAddr> {
         let ipv4_addr = |p: &mut Parser| p.read_ipv4_addr();
         let ipv6_addr = |p: &mut Parser| p.read_ipv6_addr();
-        self.read_or([ipv4_addr, ipv6_addr])
+        self.read_or(&mut [ipv4_addr, ipv6_addr])
     }
 
     fn read_socket_addr(&mut self) -> Option<SocketAddr> {
@@ -311,7 +318,7 @@ impl<'a> Parser<'a> {
                 p.read_seq_3::<char, IpAddr, char>(open_br, ip_addr, clos_br)
                         .map(|t| match t { (_, ip, _) => ip })
             };
-            p.read_or([ipv4_p, ipv6_p])
+            p.read_or(&mut [ipv4_p, ipv6_p])
         };
         let colon = |p: &mut Parser| p.read_given_char(':');
         let port  = |p: &mut Parser| p.read_number(10, 5, 0x10000).map(|n| n as u16);
@@ -339,6 +346,7 @@ impl FromStr for SocketAddr {
 mod test {
     use prelude::*;
     use super::*;
+    use from_str::FromStr;
 
     #[test]
     fn test_from_str_ipv4() {
@@ -402,7 +410,7 @@ mod test {
         // colon after v4
         let none: Option<IpAddr> = FromStr::from_str("::127.0.0.1:");
         assert_eq!(None, none);
-        // not enought groups
+        // not enough groups
         let none: Option<IpAddr> = FromStr::from_str("1.2.3.4.5:127.0.0.1");
         assert_eq!(None, none);
         // too many groups
@@ -435,10 +443,11 @@ mod test {
     }
 
     #[test]
-    fn ipv6_addr_to_str() {
+    fn ipv6_addr_to_string() {
         let a1 = Ipv6Addr(0, 0, 0, 0, 0, 0xffff, 0xc000, 0x280);
-        assert!(a1.to_str() == ~"::ffff:192.0.2.128" || a1.to_str() == ~"::FFFF:192.0.2.128");
-        assert_eq!(Ipv6Addr(8, 9, 10, 11, 12, 13, 14, 15).to_str(), ~"8:9:a:b:c:d:e:f");
+        assert!(a1.to_string() == "::ffff:192.0.2.128".to_string() ||
+                a1.to_string() == "::FFFF:192.0.2.128".to_string());
+        assert_eq!(Ipv6Addr(8, 9, 10, 11, 12, 13, 14, 15).to_string(),
+                   "8:9:a:b:c:d:e:f".to_string());
     }
-
 }

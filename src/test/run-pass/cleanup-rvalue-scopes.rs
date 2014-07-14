@@ -12,7 +12,7 @@
 // statement or end of block, as appropriate given the temporary
 // lifetime rules.
 
-#[feature(macro_rules)];
+#![feature(macro_rules)]
 
 use std::ops::Drop;
 
@@ -110,18 +110,17 @@ pub fn main() {
     end_of_block!(ref _x, AddFlags(1));
     end_of_block!(AddFlags { bits: ref _x }, AddFlags(1));
     end_of_block!(&AddFlags { bits }, &AddFlags(1));
-    end_of_block!((_, ref _y), (AddFlags(1), 22));
-    end_of_block!(~ref _x, ~AddFlags(1));
-    end_of_block!(~_x, ~AddFlags(1));
+    end_of_block!((_, ref _y), (AddFlags(1), 22i));
+    end_of_block!(box ref _x, box AddFlags(1));
+    end_of_block!(box _x, box AddFlags(1));
     end_of_block!(_, { { check_flags(0); &AddFlags(1) } });
     end_of_block!(_, &((Box { f: AddFlags(1) }).f));
     end_of_block!(_, &(([AddFlags(1)])[0]));
-    end_of_block!(_, &((&~[AddFlags(1)])[0]));
 
     // LHS does not create a ref binding, so temporary lives as long
     // as statement, and we do not move the AddFlags out:
     end_of_stmt!(_, AddFlags(1));
-    end_of_stmt!((_, _), (AddFlags(1), 22));
+    end_of_stmt!((_, _), (AddFlags(1), 22i));
 
     // `&` operator appears inside an arg to a function,
     // so it is not prolonged:

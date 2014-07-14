@@ -1,6 +1,4 @@
-// xfail-pretty
-
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -10,19 +8,21 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Test performance of a task "spawn ladder", in which children task have many
+// Test performance of a task "spawn ladder", in which children task have
 // many ancestor taskgroups, but with only a few such groups alive at a time.
 // Each child task has to enlist as a descendant in each of its ancestor
 // groups, but that shouldn't have to happen for already-dead groups.
 //
 // The filename is a song reference; google it in quotes.
 
+// ignore-pretty very bad with line comments
+
 use std::comm;
 use std::os;
 use std::task;
 use std::uint;
 
-fn child_generation(gens_left: uint, c: comm::Chan<()>) {
+fn child_generation(gens_left: uint, tx: comm::Sender<()>) {
     // This used to be O(n^2) in the number of generations that ever existed.
     // With this code, only as many generations are alive at a time as tasks
     // alive at a time,
@@ -31,9 +31,9 @@ fn child_generation(gens_left: uint, c: comm::Chan<()>) {
             task::deschedule(); // shake things up a bit
         }
         if gens_left > 0 {
-            child_generation(gens_left - 1, c); // recurse
+            child_generation(gens_left - 1, tx); // recurse
         } else {
-            c.send(())
+            tx.send(())
         }
     });
 }
@@ -41,16 +41,16 @@ fn child_generation(gens_left: uint, c: comm::Chan<()>) {
 fn main() {
     let args = os::args();
     let args = if os::getenv("RUST_BENCH").is_some() {
-        ~[~"", ~"100000"]
+        vec!("".to_string(), "100000".to_string())
     } else if args.len() <= 1 {
-        ~[~"", ~"100"]
+        vec!("".to_string(), "100".to_string())
     } else {
-        args.clone()
+        args.clone().move_iter().collect()
     };
 
-    let (p,c) = Chan::new();
-    child_generation(from_str::<uint>(args[1]).unwrap(), c);
-    if p.recv_opt().is_none() {
+    let (tx, rx) = channel();
+    child_generation(from_str::<uint>(args.get(1).as_slice()).unwrap(), tx);
+    if rx.recv_opt().is_err() {
         fail!("it happened when we slumbered");
     }
 }

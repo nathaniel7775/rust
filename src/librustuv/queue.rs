@@ -18,12 +18,13 @@
 //! event loop alive we use uv_ref and uv_unref in order to control when the
 //! async handle is active or not.
 
-#[allow(dead_code)];
+#![allow(dead_code)]
 
-use std::cast;
-use std::libc::{c_void, c_int};
+use alloc::arc::Arc;
+use libc::c_void;
+use std::mem;
+use std::rt::mutex::NativeMutex;
 use std::rt::task::BlockedTask;
-use std::unstable::sync::LittleLock;
 use mpsc = std::sync::mpsc_queue;
 
 use async::AsyncWatcher;
@@ -37,48 +38,47 @@ enum Message {
 }
 
 struct State {
-    handle: *uvll::uv_async_t,
-    lock: LittleLock, // see comments in async_cb for why this is needed
+    handle: *mut uvll::uv_async_t,
+    lock: NativeMutex, // see comments in async_cb for why this is needed
+    queue: mpsc::Queue<Message>,
 }
 
 /// This structure is intended to be stored next to the event loop, and it is
 /// used to create new `Queue` structures.
 pub struct QueuePool {
-    priv producer: mpsc::Producer<Message, State>,
-    priv consumer: mpsc::Consumer<Message, State>,
-    priv refcnt: uint,
+    queue: Arc<State>,
+    refcnt: uint,
 }
 
 /// This type is used to send messages back to the original event loop.
 pub struct Queue {
-    priv queue: mpsc::Producer<Message, State>,
+    queue: Arc<State>,
 }
 
-extern fn async_cb(handle: *uvll::uv_async_t, status: c_int) {
-    assert_eq!(status, 0);
-    let state: &mut QueuePool = unsafe {
-        cast::transmute(uvll::get_data_for_uv_handle(handle))
+extern fn async_cb(handle: *mut uvll::uv_async_t) {
+    let pool: &mut QueuePool = unsafe {
+        mem::transmute(uvll::get_data_for_uv_handle(handle))
     };
-    let packet = unsafe { state.consumer.packet() };
+    let state: &State = &*pool.queue;
 
     // Remember that there is no guarantee about how many times an async
     // callback is called with relation to the number of sends, so process the
     // entire queue in a loop.
     loop {
-        match state.consumer.pop() {
+        match state.queue.pop() {
             mpsc::Data(Task(task)) => {
-                task.wake().map(|t| t.reawaken(true));
+                let _ = task.wake().map(|t| t.reawaken());
             }
             mpsc::Data(Increment) => unsafe {
-                if state.refcnt == 0 {
-                    uvll::uv_ref((*packet).handle);
+                if pool.refcnt == 0 {
+                    uvll::uv_ref(state.handle);
                 }
-                state.refcnt += 1;
+                pool.refcnt += 1;
             },
             mpsc::Data(Decrement) => unsafe {
-                state.refcnt -= 1;
-                if state.refcnt == 0 {
-                    uvll::uv_unref((*packet).handle);
+                pool.refcnt -= 1;
+                if pool.refcnt == 0 {
+                    uvll::uv_unref(state.handle);
                 }
             },
             mpsc::Empty | mpsc::Inconsistent => break
@@ -99,30 +99,30 @@ extern fn async_cb(handle: *uvll::uv_async_t, status: c_int) {
     // If we acquire the mutex here, then we are guaranteed that there are no
     // longer any senders which are holding on to their handles, so we can
     // safely allow the event loop to exit.
-    if state.refcnt == 0 {
+    if pool.refcnt == 0 {
         unsafe {
-            let _l = (*packet).lock.lock();
+            let _l = state.lock.lock();
         }
     }
 }
 
 impl QueuePool {
-    pub fn new(loop_: &mut Loop) -> ~QueuePool {
+    pub fn new(loop_: &mut Loop) -> Box<QueuePool> {
         let handle = UvHandle::alloc(None::<AsyncWatcher>, uvll::UV_ASYNC);
-        let (c, p) = mpsc::queue(State {
+        let state = Arc::new(State {
             handle: handle,
-            lock: LittleLock::new(),
+            lock: unsafe {NativeMutex::new()},
+            queue: mpsc::Queue::new(),
         });
-        let q = ~QueuePool {
-            producer: p,
-            consumer: c,
+        let mut q = box QueuePool {
             refcnt: 0,
+            queue: state,
         };
 
         unsafe {
             assert_eq!(uvll::uv_async_init(loop_.handle, handle, async_cb), 0);
             uvll::uv_unref(handle);
-            let data: *c_void = *cast::transmute::<&~QueuePool, &*c_void>(&q);
+            let data = &mut *q as *mut QueuePool as *mut c_void;
             uvll::set_data_for_uv_handle(handle, data);
         }
 
@@ -132,24 +132,20 @@ impl QueuePool {
     pub fn queue(&mut self) -> Queue {
         unsafe {
             if self.refcnt == 0 {
-                uvll::uv_ref((*self.producer.packet()).handle);
+                uvll::uv_ref(self.queue.handle);
             }
             self.refcnt += 1;
         }
-        Queue { queue: self.producer.clone() }
+        Queue { queue: self.queue.clone() }
     }
 
-    pub fn handle(&self) -> *uvll::uv_async_t {
-        unsafe { (*self.producer.packet()).handle }
-    }
+    pub fn handle(&self) -> *mut uvll::uv_async_t { self.queue.handle }
 }
 
 impl Queue {
     pub fn push(&mut self, task: BlockedTask) {
-        self.queue.push(Task(task));
-        unsafe {
-            uvll::uv_async_send((*self.queue.packet()).handle);
-        }
+        self.queue.queue.push(Task(task));
+        unsafe { uvll::uv_async_send(self.queue.handle); }
     }
 }
 
@@ -160,9 +156,7 @@ impl Clone for Queue {
         // that the count is at least one (because we have a queue right here),
         // and if the queue is dropped later on it'll see the increment for the
         // decrement anyway.
-        unsafe {
-            cast::transmute_mut(self).queue.push(Increment);
-        }
+        self.queue.queue.push(Increment);
         Queue { queue: self.queue.clone() }
     }
 }
@@ -172,10 +166,9 @@ impl Drop for Queue {
         // See the comments in the async_cb function for why there is a lock
         // that is acquired only on a drop.
         unsafe {
-            let state = self.queue.packet();
-            let _l = (*state).lock.lock();
-            self.queue.push(Decrement);
-            uvll::uv_async_send((*state).handle);
+            let _l = self.queue.lock.lock();
+            self.queue.queue.push(Decrement);
+            uvll::uv_async_send(self.queue.handle);
         }
     }
 }
@@ -183,7 +176,7 @@ impl Drop for Queue {
 impl Drop for State {
     fn drop(&mut self) {
         unsafe {
-            uvll::uv_close(self.handle, cast::transmute(0));
+            uvll::uv_close(self.handle, mem::transmute(0u));
             // Note that this does *not* free the handle, that is the
             // responsibility of the caller because the uv loop must be closed
             // before we deallocate this uv handle.

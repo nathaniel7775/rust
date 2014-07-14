@@ -14,7 +14,7 @@ pub trait Foo {
 }
 
 pub struct Bar {
-    x: ~str
+    pub x: String
 }
 
 impl Foo for Bar {

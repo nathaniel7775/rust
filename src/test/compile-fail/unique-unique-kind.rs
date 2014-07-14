@@ -8,12 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
+
+use std::gc::GC;
 
 fn f<T:Send>(_i: T) {
 }
 
 fn main() {
-    let i = ~@100;
+    let i = box box(GC) 100i;
     f(i); //~ ERROR does not fulfill `Send`
 }

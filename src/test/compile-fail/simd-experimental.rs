@@ -8,11 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-test FIXME #11741 tuple structs ignore stability attributes
+#![deny(experimental)]
 
-#[deny(experimental)];
-
-use std::unstable::simd;
+use std::simd;
 
 fn main() {
     let _ = simd::i64x2(0, 0); //~ ERROR: experimental

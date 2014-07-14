@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,17 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// xfail-fast
 // aux-build:issue-3012-1.rs
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
 
-extern mod socketlib;
+extern crate socketlib;
+extern crate libc;
 
+use std::gc::GC;
 use socketlib::socket;
-use std::libc;
 
 pub fn main() {
     let fd: libc::c_int = 1 as libc::c_int;
-    let _sock = @socket::socket_handle(fd);
+    let _sock = box(GC) socket::socket_handle(fd);
 }

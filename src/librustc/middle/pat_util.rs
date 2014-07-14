@@ -8,31 +8,31 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
+use middle::def::*;
 use middle::resolve;
 
-use std::hashmap::HashMap;
+use std::collections::HashMap;
+use std::gc::{Gc, GC};
 use syntax::ast::*;
-use syntax::ast_util::{path_to_ident, walk_pat};
-use syntax::codemap::Span;
+use syntax::ast_util::{walk_pat};
+use syntax::codemap::{Span, DUMMY_SP};
 
 pub type PatIdMap = HashMap<Ident, NodeId>;
 
 // This is used because same-named variables in alternative patterns need to
 // use the NodeId of their namesake in the first pattern.
-pub fn pat_id_map(dm: resolve::DefMap, pat: &Pat) -> PatIdMap {
+pub fn pat_id_map(dm: &resolve::DefMap, pat: &Pat) -> PatIdMap {
     let mut map = HashMap::new();
-    pat_bindings(dm, pat, |_bm, p_id, _s, n| {
-      map.insert(path_to_ident(n), p_id);
+    pat_bindings(dm, pat, |_bm, p_id, _s, path1| {
+      map.insert(path1.node, p_id);
     });
     map
 }
 
-pub fn pat_is_variant_or_struct(dm: resolve::DefMap, pat: &Pat) -> bool {
+pub fn pat_is_variant_or_struct(dm: &resolve::DefMap, pat: &Pat) -> bool {
     match pat.node {
         PatEnum(_, _) | PatIdent(_, _, None) | PatStruct(..) => {
-            let dm = dm.borrow();
-            match dm.get().find(&pat.id) {
+            match dm.borrow().find(&pat.id) {
                 Some(&DefVariant(..)) | Some(&DefStruct(..)) => true,
                 _ => false
             }
@@ -41,11 +41,10 @@ pub fn pat_is_variant_or_struct(dm: resolve::DefMap, pat: &Pat) -> bool {
     }
 }
 
-pub fn pat_is_const(dm: resolve::DefMap, pat: &Pat) -> bool {
+pub fn pat_is_const(dm: &resolve::DefMap, pat: &Pat) -> bool {
     match pat.node {
         PatIdent(_, _, None) | PatEnum(..) => {
-            let dm = dm.borrow();
-            match dm.get().find(&pat.id) {
+            match dm.borrow().find(&pat.id) {
                 Some(&DefStatic(_, false)) => true,
                 _ => false
             }
@@ -54,7 +53,7 @@ pub fn pat_is_const(dm: resolve::DefMap, pat: &Pat) -> bool {
     }
 }
 
-pub fn pat_is_binding(dm: resolve::DefMap, pat: &Pat) -> bool {
+pub fn pat_is_binding(dm: &resolve::DefMap, pat: &Pat) -> bool {
     match pat.node {
         PatIdent(..) => {
             !pat_is_variant_or_struct(dm, pat) &&
@@ -64,7 +63,7 @@ pub fn pat_is_binding(dm: resolve::DefMap, pat: &Pat) -> bool {
     }
 }
 
-pub fn pat_is_binding_or_wild(dm: resolve::DefMap, pat: &Pat) -> bool {
+pub fn pat_is_binding_or_wild(dm: &resolve::DefMap, pat: &Pat) -> bool {
     match pat.node {
         PatIdent(..) => pat_is_binding(dm, pat),
         PatWild | PatWildMulti => true,
@@ -74,9 +73,9 @@ pub fn pat_is_binding_or_wild(dm: resolve::DefMap, pat: &Pat) -> bool {
 
 /// Call `it` on every "binding" in a pattern, e.g., on `a` in
 /// `match foo() { Some(a) => (), None => () }`
-pub fn pat_bindings(dm: resolve::DefMap,
+pub fn pat_bindings(dm: &resolve::DefMap,
                     pat: &Pat,
-                    it: |BindingMode, NodeId, Span, &Path|) {
+                    it: |BindingMode, NodeId, Span, &SpannedIdent|) {
     walk_pat(pat, |p| {
         match p.node {
           PatIdent(binding_mode, ref pth, _) if pat_is_binding(dm, p) => {
@@ -88,15 +87,9 @@ pub fn pat_bindings(dm: resolve::DefMap,
     });
 }
 
-pub fn pat_binding_ids(dm: resolve::DefMap, pat: &Pat) -> ~[NodeId] {
-    let mut found = ~[];
-    pat_bindings(dm, pat, |_bm, b_id, _sp, _pt| found.push(b_id) );
-    return found;
-}
-
 /// Checks if the pattern contains any patterns that bind something to
 /// an ident, e.g. `foo`, or `Foo(foo)` or `foo @ Bar(..)`.
-pub fn pat_contains_bindings(dm: resolve::DefMap, pat: &Pat) -> bool {
+pub fn pat_contains_bindings(dm: &resolve::DefMap, pat: &Pat) -> bool {
     let mut contains_bindings = false;
     walk_pat(pat, |p| {
         if pat_is_binding(dm, p) {
@@ -109,13 +102,17 @@ pub fn pat_contains_bindings(dm: resolve::DefMap, pat: &Pat) -> bool {
     contains_bindings
 }
 
-pub fn simple_identifier<'a>(pat: &'a Pat) -> Option<&'a Path> {
+pub fn simple_identifier<'a>(pat: &'a Pat) -> Option<&'a Ident> {
     match pat.node {
-        PatIdent(BindByValue(_), ref path, None) => {
-            Some(path)
+        PatIdent(BindByValue(_), ref path1, None) => {
+            Some(&path1.node)
         }
         _ => {
             None
         }
     }
+}
+
+pub fn wild() -> Gc<Pat> {
+    box (GC) Pat { id: 0, node: PatWild, span: DUMMY_SP }
 }

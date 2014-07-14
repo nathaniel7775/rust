@@ -8,7 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[feature(managed_boxes)];
+#![feature(managed_boxes)]
+
+use std::gc::Gc;
 
 // test that autoderef of a type like this does not
 // cause compiler to loop.  Note that no instances
@@ -18,7 +20,7 @@ struct t { //~ ERROR this type cannot be instantiated
   to_str: (),
 }
 
-struct x(@t); //~ ERROR this type cannot be instantiated
+struct x(Gc<t>); //~ ERROR this type cannot be instantiated
 
 fn main() {
 }

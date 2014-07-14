@@ -10,8 +10,9 @@
 
 // Exercise the unused_unsafe attribute in some positive and negative cases
 
-#[allow(dead_code)];
-#[deny(unused_unsafe)];
+#![allow(dead_code)]
+#![deny(unused_unsafe)]
+
 
 mod foo {
     extern {
@@ -49,7 +50,7 @@ fn good2() {
        sure that when purity is inherited that the source of the unsafe-ness
        is tracked correctly */
     unsafe {
-        unsafe fn what() -> ~[~str] { fail!() }
+        unsafe fn what() -> Vec<String> { fail!() }
 
         callback(|| {
             what();

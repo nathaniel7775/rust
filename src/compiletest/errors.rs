@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -9,54 +9,36 @@
 // except according to those terms.
 
 use std::io::{BufferedReader, File};
+use regex::Regex;
 
-pub struct ExpectedError { line: uint, kind: ~str, msg: ~str }
-
-// Load any test directives embedded in the file
-pub fn load_errors(testfile: &Path) -> ~[ExpectedError] {
-
-    let mut error_patterns = ~[];
-    let mut rdr = BufferedReader::new(File::open(testfile).unwrap());
-    let mut line_num = 1u;
-    for ln in rdr.lines() {
-        error_patterns.push_all_move(parse_expected(line_num, ln));
-        line_num += 1u;
-    }
-    return error_patterns;
+pub struct ExpectedError {
+    pub line: uint,
+    pub kind: String,
+    pub msg: String,
 }
 
-fn parse_expected(line_num: uint, line: ~str) -> ~[ExpectedError] {
-    let line = line.trim();
-    let error_tag = ~"//~";
-    let mut idx;
-    match line.find_str(error_tag) {
-      None => return ~[],
-      Some(nn) => { idx = (nn as uint) + error_tag.len(); }
-    }
+pub static EXPECTED_PATTERN : &'static str = r"//~(?P<adjusts>\^*)\s*(?P<kind>\S*)\s*(?P<msg>.*)";
 
-    // "//~^^^ kind msg" denotes a message expected
-    // three lines above current line:
-    let mut adjust_line = 0u;
-    let len = line.len();
-    while idx < len && line[idx] == ('^' as u8) {
-        adjust_line += 1u;
-        idx += 1u;
-    }
+// Load any test directives embedded in the file
+pub fn load_errors(re: &Regex, testfile: &Path) -> Vec<ExpectedError> {
+    let mut rdr = BufferedReader::new(File::open(testfile).unwrap());
 
-    // Extract kind:
-    while idx < len && line[idx] == (' ' as u8) { idx += 1u; }
-    let start_kind = idx;
-    while idx < len && line[idx] != (' ' as u8) { idx += 1u; }
+    rdr.lines().enumerate().filter_map(|(line_no, ln)| {
+        parse_expected(line_no + 1, ln.unwrap().as_slice(), re)
+    }).collect()
+}
 
-    let kind = line.slice(start_kind, idx);
-    let kind = kind.to_ascii().to_lower().into_str();
+fn parse_expected(line_num: uint, line: &str, re: &Regex) -> Option<ExpectedError> {
+    re.captures(line).and_then(|caps| {
+        let adjusts = caps.name("adjusts").len();
+        let kind = caps.name("kind").to_ascii().to_lower().into_string();
+        let msg = caps.name("msg").trim().to_string();
 
-    // Extract msg:
-    while idx < len && line[idx] == (' ' as u8) { idx += 1u; }
-    let msg = line.slice(idx, len).to_owned();
-
-    debug!("line={} kind={} msg={}", line_num - adjust_line, kind, msg);
-
-    return ~[ExpectedError{line: line_num - adjust_line, kind: kind,
-                           msg: msg}];
+        debug!("line={} kind={} msg={}", line_num, kind, msg);
+        Some(ExpectedError {
+            line: line_num - adjusts,
+            kind: kind,
+            msg: msg,
+        })
+    })
 }

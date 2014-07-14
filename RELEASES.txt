@@ -1,3 +1,301 @@
+Version 0.11.0 (July 2014)
+-------------------------
+
+  * ~1700 changes, numerous bugfixes
+
+  * Language
+    * ~[T] has been removed from the language. This type is superseded by
+      the Vec<T> type.
+    * ~str has been removed from the language. This type is superseded by
+      the String type.
+    * ~T has been removed from the language. This type is superseded by the
+      Box<T> type.
+    * @T has been removed from the language. This type is superseded by the
+      standard library's std::gc::Gc<T> type.
+    * Struct fields are now all private by default.
+    * Vector indices and shift amounts are both required to be a `uint`
+      instead of any integral type.
+    * Byte character, byte string, and raw byte string literals are now all
+      supported by prefixing the normal literal with a `b`.
+    * Multiple ABIs are no longer allowed in an ABI string
+    * The syntax for lifetimes on closures/procedures has been tweaked
+      slightly: `<'a>|A, B|: 'b + K -> T`
+    * Floating point modulus has been removed from the language; however it
+      is still provided by a library implementation.
+    * Private enum variants are now disallowed.
+    * The `priv` keyword has been removed from the language.
+    * A closure can no longer be invoked through a &-pointer.
+    * The `use foo, bar, baz;` syntax has been removed from the language.
+    * The transmute intrinsic no longer works on type parameters.
+    * Statics now allow blocks/items in their definition.
+    * Trait bounds are separated from objects with + instead of : now.
+    * Objects can no longer be read while they are mutably borrowed.
+    * The address of a static is now marked as insignificant unless the
+      #[inline(never)] attribute is placed it.
+    * The #[unsafe_destructor] attribute is now behind a feature gate.
+    * Struct literals are no longer allowed in ambiguous positions such as
+      if, while, match, and for..in.
+    * Declaration of lang items and intrinsics are now feature-gated by
+      default.
+    * Integral literals no longer default to `int`, and floating point
+      literals no longer default to `f64`. Literals must be suffixed with an
+      appropriate type if inference cannot determine the type of the
+      literal.
+    * The Box<T> type is no longer implicitly borrowed to &mut T.
+    * Procedures are now required to not capture borrowed references.
+
+  * Libraries
+    * The standard library is now a "facade" over a number of underlying
+      libraries. This means that development on the standard library should
+      be speeder due to smaller crates, as well as a clearer line between
+      all dependencies.
+    * A new library, libcore, lives under the standard library's facade
+      which is Rust's "0-assumption" library, suitable for embedded and
+      kernel development for example.
+    * A regex crate has been added to the standard distribution. This crate
+      includes statically compiled regular expressions.
+    * The unwrap/unwrap_err methods on Result require a Show bound for
+      better error messages.
+    * The return types of the std::comm primitives have been centralized
+      around the Result type.
+    * A number of I/O primitives have gained the ability to time out their
+      operations.
+    * A number of I/O primitives have gained the ability to close their
+      reading/writing halves to cancel pending operations.
+    * Reverse iterator methods have been removed in favor of `rev()` on
+      their forward-iteration counterparts.
+    * A bitflags! macro has been added to enable easy interop with C and
+      management of bit flags.
+    * A debug_assert! macro is now provided which is disabled when
+      `--cfg ndebug` is passed to the compiler.
+    * A graphviz crate has been added for creating .dot files.
+    * The std::cast module has been migrated into std::mem.
+    * The std::local_data api has been migrated from freestanding functions
+      to being based on methods.
+    * The Pod trait has been renamed to Copy.
+    * jemalloc has been added as the default allocator for types.
+    * The API for allocating memory has been changed to use proper alignment
+      and sized deallocation
+    * Connecting a TcpStream or binding a TcpListener is now based on a
+      string address and a u16 port. This allows connecting to a hostname as
+      opposed to an IP.
+    * The Reader trait now contains a core method, read_at_least(), which
+      correctly handles many repeated 0-length reads.
+    * The process-spawning API is now centered around a builder-style
+      Command struct.
+    * The :? printing qualifier has been moved from the standard library to
+      an external libdebug crate.
+    * Eq/Ord have been renamed to PartialEq/PartialOrd. TotalEq/TotalOrd
+      have been renamed to Eq/Ord.
+    * The select/plural methods have been removed from format!. The escapes
+      for { and } have also changed from \{ and \} to {{ and }},
+      respectively.
+    * The TaskBuilder API has been re-worked to be a true builder, and
+      extension traits for spawning native/green tasks have been added.
+
+  * Tooling
+    * All breaking changes to the language or libraries now have their
+      commit message annotated with `[breaking-change]` to allow for easy
+      discovery of breaking changes.
+    * The compiler will now try to suggest how to annotate lifetimes if a
+      lifetime-related error occurs.
+    * Debug info continues to be improved greatly with general bug fixes and
+      better support for situations like link time optimization (LTO).
+    * Usage of syntax extensions when cross-compiling has been fixed.
+    * Functionality equivalent to GCC & Clang's -ffunction-sections,
+      -fdata-sections and --gc-sections has been enabled by default
+    * The compiler is now stricter about where it will load module files
+      from when a module is declared via `mod foo;`.
+    * The #[phase(syntax)] attribute has been renamed to #[phase(plugin)].
+      Syntax extensions are now discovered via a "plugin registrar" type
+      which will be extended in the future to other various plugins.
+    * Lints have been restructured to allow for dynamically loadable lints.
+    * A number of rustdoc improvements:
+      * The HTML output has been visually redesigned.
+      * Markdown is now powered by hoedown instead of sundown.
+      * Searching heuristics have been greatly improved.
+      * The search index has been reduced in size by a great amount.
+      * Cross-crate documentation via `pub use` has been greatly improved.
+      * Primitive types are now hyperlinked and documented.
+    * Documentation has been moved from static.rust-lang.org/doc to
+      doc.rust-lang.org
+    * A new sandbox, play.rust-lang.org, is available for running and
+      sharing rust code examples on-line.
+    * Unused attributes are now more robustly warned about.
+    * The dead_code lint now warns about unused struct fields.
+    * Cross-compiling to iOS is now supported.
+    * Cross-compiling to mipsel is now supported.
+    * Stability attributes are now inherited by default and no longer apply
+      to intra-crate usage, only inter-crate usage.
+    * Error message related to non-exhaustive match expressions have been
+      greatly improved.
+
+Version 0.10 (April 2014)
+-------------------------
+
+  * ~1500 changes, numerous bugfixes
+
+  * Language
+    * A new RFC process is now in place for modifying the language.
+    * Patterns with `@`-pointers have been removed from the language.
+    * Patterns with unique vectors (`~[T]`) have been removed from the
+      language.
+    * Patterns with unique strings (`~str`) have been removed from the
+      language.
+    * `@str` has been removed from the language.
+    * `@[T]` has been removed from the language.
+    * `@self` has been removed from the language.
+    * `@Trait` has been removed from the language.
+    * Headers on `~` allocations which contain `@` boxes inside the type for
+      reference counting have been removed.
+    * The semantics around the lifetimes of temporary expressions have changed,
+      see #3511 and #11585 for more information.
+    * Cross-crate syntax extensions are now possible, but feature gated. See
+      #11151 for more information. This includes both `macro_rules!` macros as
+      well as syntax extensions such as `format!`.
+    * New lint modes have been added, and older ones have been turned on to be
+      warn-by-default.
+      * Unnecessary parentheses
+      * Uppercase statics
+      * Camel Case types
+      * Uppercase variables
+      * Publicly visible private types
+      * `#[deriving]` with raw pointers
+    * Unsafe functions can no longer be coerced to closures.
+    * Various obscure macros such as `log_syntax!` are now behind feature gates.
+    * The `#[simd]` attribute is now behind a feature gate.
+    * Visibility is no longer allowed on `extern crate` statements, and
+      unnecessary visibility (`priv`) is no longer allowed on `use` statements.
+    * Trailing commas are now allowed in argument lists and tuple patterns.
+    * The `do` keyword has been removed, it is now a reserved keyword.
+    * Default type parameters have been implemented, but are feature gated.
+    * Borrowed variables through captures in closures are now considered soundly.
+    * `extern mod` is now `extern crate`
+    * The `Freeze` trait has been removed.
+    * The `Share` trait has been added for types that can be shared among
+      threads.
+    * Labels in macros are now hygienic.
+    * Expression/statement macro invocations can be delimited with `{}` now.
+    * Treatment of types allowed in `static mut` locations has been tweaked.
+    * The `*` and `.` operators are now overloadable through the `Deref` and
+      `DerefMut` traits.
+    * `~Trait` and `proc` no longer have `Send` bounds by default.
+    * Partial type hints are now supported with the `_` type marker.
+    * An `Unsafe` type was introduced for interior mutability. It is now
+      considered undefined to transmute from `&T` to `&mut T` without using the
+      `Unsafe` type.
+    * The #[linkage] attribute was implemented for extern statics/functions.
+    * The inner attribute syntax has changed from `#[foo];` to `#![foo]`.
+    * `Pod` was renamed to `Copy`.
+
+  * Libraries
+    * The `libextra` library has been removed. It has now been decomposed into
+      component libraries with smaller and more focused nuggets of
+      functionality. The full list of libraries can be found on the
+      documentation index page.
+    * std: `std::condition` has been removed. All I/O errors are now propagated
+      through the `Result` type. In order to assist with error handling, a
+      `try!` macro for unwrapping errors with an early return and a lint for
+      unused results has been added. See #12039 for more information.
+    * std: The `vec` module has been renamed to `slice`.
+    * std: A new vector type, `Vec<T>`, has been added in preparation for DST.
+      This will become the only growable vector in the future.
+    * std: `std::io` now has more public-reexports. Types such as `BufferedReader`
+      are now found at `std::io::BufferedReader` instead of
+      `std::io::buffered::BufferedReader`.
+    * std: `print` and `println` are no longer in the prelude, the `print!` and
+      `println!` macros are intended to be used instead.
+    * std: `Rc` now has a `Weak` pointer for breaking cycles, and it no longer
+      attempts to statically prevent cycles.
+    * std: The standard distribution is adopting the policy of pushing failure
+      to the user rather than failing in libraries. Many functions (such as
+      `slice::last()`) now return `Option<T>` instead of `T` + failing.
+    * std: `fmt::Default` has been renamed to `fmt::Show`, and it now has a new
+      deriving mode: `#[deriving(Show)]`.
+    * std: `ToStr` is now implemented for all types implementing `Show`.
+    * std: The formatting trait methods now take `&self` instead of `&T`
+    * std: The `invert()` method on iterators has been renamed to `rev()`
+    * std: `std::num` has seen a reduction in the genericity of its traits,
+      consolidating functionality into a few core traits.
+    * std: Backtraces are now printed on task failure if the environment
+      variable `RUST_BACKTRACE` is present.
+    * std: Naming conventions for iterators have been standardized. More details
+      can be found on the wiki's style guide.
+    * std: `eof()` has been removed from the `Reader` trait. Specific types may
+      still implement the function.
+    * std: Networking types are now cloneable to allow simultaneous reads/writes.
+    * std: `assert_approx_eq!` has been removed
+    * std: The `e` and `E` formatting specifiers for floats have been added to
+      print them in exponential notation.
+    * std: The `Times` trait has been removed
+    * std: Indications of variance and opting out of builtin bounds is done
+      through marker types in `std::kinds::marker` now
+    * std: `hash` has been rewritten, `IterBytes` has been removed, and
+      `#[deriving(Hash)]` is now possible.
+    * std: `SharedChan` has been removed, `Sender` is now cloneable.
+    * std: `Chan` and `Port` were renamed to `Sender` and `Receiver`.
+    * std: `Chan::new` is now `channel()`.
+    * std: A new synchronous channel type has been implemented.
+    * std: A `select!` macro is now provided for selecting over `Receiver`s.
+    * std: `hashmap` and `trie` have been moved to `libcollections`
+    * std: `run` has been rolled into `io::process`
+    * std: `assert_eq!` now uses `{}` instead of `{:?}`
+    * std: The equality and comparison traits have seen some reorganization.
+    * std: `rand` has moved to `librand`.
+    * std: `to_{lower,upper}case` has been implemented for `char`.
+    * std: Logging has been moved to `liblog`.
+    * collections: `HashMap` has been rewritten for higher performance and less
+      memory usage.
+    * native: The default runtime is now `libnative`. If `libgreen` is desired,
+      it can be booted manually. The runtime guide has more information and
+      examples.
+    * native: All I/O functionality except signals has been implemented.
+    * green: Task spawning with `libgreen` has been optimized with stack caching
+      and various trimming of code.
+    * green: Tasks spawned by `libgreen` now have an unmapped guard page.
+    * sync: The `extra::sync` module has been updated to modern rust (and moved
+      to the `sync` library), tweaking and improving various interfaces while
+      dropping redundant functionality.
+    * sync: A new `Barrier` type has been added to the `sync` library.
+    * sync: An efficient mutex for native and green tasks has been implemented.
+    * serialize: The `base64` module has seen some improvement. It treats
+      newlines better, has non-string error values, and has seen general
+      cleanup.
+    * fourcc: A `fourcc!` macro was introduced
+    * hexfloat: A `hexfloat!` macro was implemented for specifying floats via a
+      hexadecimal literal.
+
+  * Tooling
+    * `rustpkg` has been deprecated and removed from the main repository. Its
+      replacement, `cargo`, is under development.
+    * Nightly builds of rust are now available
+    * The memory usage of rustc has been improved many times throughout this
+      release cycle.
+    * The build process supports disabling rpath support for the rustc binary
+      itself.
+    * Code generation has improved in some cases, giving more information to the
+      LLVM optimization passes to enable more extensive optimizations.
+    * Debuginfo compatibility with lldb on OSX has been restored.
+    * The master branch is now gated on an android bot, making building for
+      android much more reliable.
+    * Output flags have been centralized into one `--emit` flag.
+    * Crate type flags have been centralized into one `--crate-type` flag.
+    * Codegen flags have been consolidated behind a `-C` flag.
+    * Linking against outdated crates now has improved error messages.
+    * Error messages with lifetimes will often suggest how to annotate the
+      function to fix the error.
+    * Many more types are documented in the standard library, and new guides
+      were written.
+    * Many `rustdoc` improvements:
+      * code blocks are syntax highlighted.
+      * render standalone markdown files.
+      * the --test flag tests all code blocks by default.
+      * exported macros are displayed.
+      * reexported types have their documentation inlined at the location of the
+        first reexport.
+      * search works across crates that have been rendered to the same output
+        directory.
+
 Version 0.9 (January 2014)
 --------------------------
 
@@ -8,7 +306,7 @@ Version 0.9 (January 2014)
       * A new facility for enabling experimental features (feature gating) has
         been added, using the crate-level `#[feature(foo)]` attribute.
       * Managed boxes (@) are now behind a feature gate
-        (`#[feature(managed_boxes)]`) in preperation for future removal. Use the
+        (`#[feature(managed_boxes)]`) in preparation for future removal. Use the
         standard library's `Gc` or `Rc` types instead.
       * `@mut` has been removed. Use `std::cell::{Cell, RefCell}` instead.
       * Jumping back to the top of a loop is now done with `continue` instead of
@@ -100,7 +398,7 @@ Version 0.9 (January 2014)
       * std: `fmt::Default` can be implemented for any type to provide default
         formatting to the `format!` macro, as in `format!("{}", myfoo)`.
       * std: The `rand` API continues to be tweaked.
-      * std: The `rust_begin_unwind` function, useful for insterting breakpoints
+      * std: The `rust_begin_unwind` function, useful for inserting breakpoints
         on failure in gdb, is now named `rust_fail`.
       * std: The `each_key` and `each_value` methods on `HashMap` have been
         replaced by the `keys` and `values` iterators.
@@ -131,7 +429,7 @@ Version 0.9 (January 2014)
         extensible interfaces and is now implemented by two different crates:
         libnative, for native threading and I/O; and libgreen, for green threading
         and I/O. This paves the way for using the standard library in more limited
-        embeded environments.
+        embedded environments.
       * std: The `comm` module has been rewritten to be much faster, have a
         simpler, more consistent API, and to work for both native and green
         threading.
@@ -745,8 +1043,8 @@ Version 0.2  (March 2012)
       * Merged per-platform std::{os*, fs*} to core::{libc, os}
       * Extensive cleanup, regularization in libstd, libcore
 
-Version 0.1  (January 2012)
----------------------------
+Version 0.1  (January 20, 2012)
+-------------------------------
 
    * Most language features work, including:
       * Unique pointers, unique closures, move semantics
